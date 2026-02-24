@@ -155,11 +155,19 @@ class DiscordBot(commands.Bot):
         executed_command = str(split[0])
         if context.guild is not None:
             self.logger.info(
-                f"Executed {executed_command} command in {context.guild.name} (ID: {context.guild.id}) by {context.author} (ID: {context.author.id})"
+                "Executed %s command in %s (ID: %s) by %s (ID: %s)",
+                executed_command,
+                context.guild.name,
+                context.guild.id,
+                context.author,
+                context.author.id,
             )
         else:
             self.logger.info(
-                f"Executed {executed_command} command by {context.author} (ID: {context.author.id}) in DMs"
+                "Executed %s command by %s (ID: %s) in DMs",
+                executed_command,
+                context.author,
+                context.author.id,
             )
 
     async def on_command_error(self, context: Context, error) -> None:
@@ -185,11 +193,17 @@ class DiscordBot(commands.Bot):
             await context.send(embed=embed)
             if context.guild:
                 self.logger.warning(
-                    f"{context.author} (ID: {context.author.id}) tried to execute an owner only command in the guild {context.guild.name} (ID: {context.guild.id}), but the user is not an owner of the bot."
+                    "%s (ID: %s) tried to execute an owner only command in the guild %s (ID: %s).",
+                    context.author,
+                    context.author.id,
+                    context.guild.name,
+                    context.guild.id,
                 )
             else:
                 self.logger.warning(
-                    f"{context.author} (ID: {context.author.id}) tried to execute an owner only command in the bot's DMs, but the user is not an owner of the bot."
+                    "%s (ID: %s) tried to execute an owner only command in the bot's DMs.",
+                    context.author,
+                    context.author.id,
                 )
         elif isinstance(error, commands.MissingPermissions):
             embed = discord.Embed(
