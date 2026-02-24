@@ -10,39 +10,7 @@ from azure.storage.blob import (
 )
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
-
-def datetime_now() -> datetime:
-    """
-    Factory function to return the current datetime.
-
-    This function is used by QueryParams to provide an up-to-date value when
-    they are NOT passed in the URL.
-
-    See:
-        https://docs.pydantic.dev/latest/concepts/models/#fields-with-dynamic-default-values
-        https://github.com/fastapi/fastapi/discussions/9802#discussioncomment-6377392
-
-    Returns:
-        datetime: current datetime.
-    """
-    return datetime.now(timezone.utc)
-
-
-def datetime_plus_one_hour() -> datetime:
-    """
-    Factory function to return the current datetime plus one hour.
-
-    This function is used by QueryParams to provide an up-to-date value when
-    they are NOT passed in the URL.
-
-    See:
-        https://docs.pydantic.dev/latest/concepts/models/#fields-with-dynamic-default-values
-        https://github.com/fastapi/fastapi/discussions/9802#discussioncomment-6377392
-
-    Returns:
-        datetime: current datetime plus one hour.
-    """
-    return datetime.now(timezone.utc) + timedelta(hours=1)
+from storage.util import datetime_now, datetime_plus_one_hour
 
 
 class ContainerRepository:
