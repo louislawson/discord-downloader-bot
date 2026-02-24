@@ -8,6 +8,8 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 
+from storage.container import ContainerRepository
+
 
 class Download(commands.Cog, name="download"):
     def __init__(self, bot) -> None:
@@ -53,9 +55,29 @@ class Download(commands.Cog, name="download"):
         zip_buffer.seek(0)
 
         zip_filename = f"{context.channel.name}-media.zip"
-        await context.interaction.followup.send(
-            file=discord.File(fp=zip_buffer, filename=zip_filename)
+
+        container = ContainerRepository()
+
+        blob_client = await container.create(
+            name=zip_filename,
+            data=zip_buffer,
+            overwrite=True,
         )
+        sas_url = await container.sas_url(blob_client)
+        # Required in dev environment as URL changes between Docker and Intranet
+        if os.getenv("ENVIRONMENT") == "dev":
+            sas_url = sas_url.replace(
+                os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
+            )
+
+        await container.con_client.close()
+
+        embed = discord.Embed(
+            title="Channel Media",
+            description=f"Click to download channel media {sas_url}",
+            color=discord.Color.green(),
+        )
+        await context.interaction.followup.send(embed=embed)
 
 
 async def setup(bot) -> None:

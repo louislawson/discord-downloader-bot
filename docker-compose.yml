@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      tags:
+        - downloader-bot:latest
+    volumes:
+      # Adds current directory as volume.
+      - .:/app/src/
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      azurite:
+        condition: service_started
+      azurite_init:
+        condition: service_completed_successfully
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+    container_name: "azurite"
+    hostname: azurite
+    restart: always
+    # skipApiVersionCheck - https://github.com/Azure/Azurite/discussions/2627
+    command: "azurite --blobHost 0.0.0.0 --blobPort 10000 --skipApiVersionCheck"
+    ports:
+      - "10000:10000"
+      # required, see https://github.com/Azure/Azurite/issues/1666
+    healthcheck:
+      test: nc 127.0.0.1 10000 -z
+      interval: 1s
+      retries: 30
+
+  # https://github.com/Azure/Azurite/issues/1665#issuecomment-1236796659
+  azurite_init:
+    image: mcr.microsoft.com/azure-cli:latest
+    command:
+      - /bin/sh
+      - -c
+      - |
+        az storage container create --name media
+    depends_on:
+      azurite:
+        condition: service_healthy
+    environment:
+      # https://github.com/Azure/Azurite/blob/main/README.md#usage-with-azure-storage-sdks-or-tools
+      AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
