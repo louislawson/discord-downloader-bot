@@ -61,9 +61,11 @@ class Download(commands.Cog, name="download"):
         sas_url = await container.sas_url(blob_client)
         # Required in dev environment as URL changes between Docker and Intranet
         if os.getenv("ENVIRONMENT") == "dev":
-            sas_url = sas_url.replace(
-                os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
-            )
+            sas_url = sas_url.replace(os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL"))
+
+        for _, file_obj in attachments:
+            file_obj.close()
+        zip_buffer.close()
 
         await container.con_client.close()
 
