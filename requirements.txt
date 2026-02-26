@@ -2,3 +2,4 @@ aiohttp
 discord.py==2.6.4
 python-dotenv
 azure-storage-blob==12.28.0
+discordhealthcheck==0.1.1

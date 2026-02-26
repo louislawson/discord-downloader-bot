@@ -10,6 +10,8 @@ services:
       - .:/app/src/
     env_file:
       - .env
+    ports:
+      - "40404:40404"
     depends_on:
       azurite:
         condition: service_started
