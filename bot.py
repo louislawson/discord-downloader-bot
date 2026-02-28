@@ -96,7 +96,6 @@ class DiscordBot(commands.Bot):
         self.logger = logger
         self.bot_prefix = os.getenv("PREFIX")
         self.invite_link = os.getenv("INVITE_LINK")
-        self.healthcheck_server = None
 
     async def load_cogs(self) -> None:
         """
