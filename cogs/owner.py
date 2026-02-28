@@ -1,10 +1,4 @@
-"""
-Copyright © Krypton 2019-Present - https://github.com/kkrypt0nn (https://krypton.ninja)
-Description:
-🐍 A simple template to start to code your own and personalized Discord bot in Python
-
-Version: 6.5.0
-"""
+"""Owner commands cog."""
 
 import discord
 from discord import app_commands
@@ -13,6 +7,16 @@ from discord.ext.commands import Context
 
 
 class Owner(commands.Cog, name="owner"):
+    """
+    Owner commands cog.
+
+    This class contains commands that can only be executed by the owner of the
+    Discord bot.
+
+    Attributes:
+        bot (DiscordBot): DiscordBot instance.
+    """
+
     def __init__(self, bot) -> None:
         self.bot = bot
 
@@ -26,10 +30,10 @@ class Owner(commands.Cog, name="owner"):
         """
         Synchonizes the slash commands.
 
-        :param context: The command context.
-        :param scope: The scope of the sync. Can be `global` or `guild`.
+        Args:
+            context (Context): The command context.
+            scope (str): The scope of the sync. Can be `global` or `guild`.
         """
-
         if scope == "global":
             await context.bot.tree.sync()
             embed = discord.Embed(
@@ -54,4 +58,10 @@ class Owner(commands.Cog, name="owner"):
 
 
 async def setup(bot) -> None:
+    """
+    Used to load this cog into a Bot.
+
+    Args:
+        bot (DiscordBot): The bot instance to load this cog.
+    """
     await bot.add_cog(Owner(bot))

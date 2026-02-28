@@ -1,10 +1,4 @@
-"""
-Copyright © Krypton 2019-Present - https://github.com/kkrypt0nn (https://krypton.ninja)
-Description:
-🐍 A simple template to start to code your own and personalized Discord bot in Python
-
-Version: 6.5.0
-"""
+"""Downloader Bot to download media from a Discord Channel."""
 
 import logging
 import os
@@ -23,6 +17,21 @@ intents.message_content = True
 
 
 class LoggingFormatter(logging.Formatter):
+    """
+    Custom logging formatter for discord.py.
+
+    Attributes:
+        black (str): black ANSI code.
+        red (str): red ANSI code.
+        green (str): green ANSI code.
+        yellow (str): yellow ANSI code.
+        blue (str): blue ANSI code.
+        gray (str): gray ANSI code.
+        reset (str): reset ANSI code.
+        bold (str): bold ANSI code.
+        COLORS (Dict[int, str]): Relates logging level to a colour/style.
+    """
+
     # Colors
     black = "\x1b[30m"
     red = "\x1b[31m"
@@ -65,7 +74,20 @@ logger.addHandler(console_handler)
 
 
 class DiscordBot(commands.Bot):
+    """
+    Custom Discord Bot class.
+
+    This class overrides some of the base function of the discord.py Bot class
+    to provide better functionality for cogs, error handling, and logging.
+
+    Attributes:
+        logger (Logger): Logger instance for this bot.
+        bot_prefix (str): Bot command prefix.
+        invite_link (str): Bot invite link.
+    """
+
     def __init__(self) -> None:
+        """Initialise the DiscordBot."""
         super().__init__(
             command_prefix=commands.when_mentioned_or(os.getenv("PREFIX")),
             intents=intents,
@@ -138,9 +160,10 @@ class DiscordBot(commands.Bot):
     # pylint: disable=arguments-differ
     async def on_message(self, message: discord.Message) -> None:
         """
-        The code in this event is executed every time someone sends a message, with or without the prefix
+        Executed every time someone sends a message.
 
-        :param message: The message that was sent.
+        Args:
+            message (Message): The message that was sent.
         """
         if message.author == self.user or message.author.bot:
             return
@@ -148,9 +171,10 @@ class DiscordBot(commands.Bot):
 
     async def on_command_completion(self, context: Context) -> None:
         """
-        The code in this event is executed every time a normal command has been *successfully* executed.
+        Executed every time a normal command has been *successfully* executed.
 
-        :param context: The context of the command that has been executed.
+        Args:
+            context (Context): The context of the command.
         """
         full_command_name = context.command.qualified_name
         split = full_command_name.split(" ")
@@ -172,12 +196,17 @@ class DiscordBot(commands.Bot):
                 context.author.id,
             )
 
-    async def on_command_error(self, context: Context, error) -> None:
+    async def on_command_error(
+        self,
+        context: Context,
+        error: errors.CommandError,
+    ) -> None:
         """
-        The code in this event is executed every time a normal valid command catches an error.
+        Executed every time a normal valid command catches an error.
 
-        :param context: The context of the normal command that failed executing.
-        :param error: The error that has been faced.
+        Args:
+            context (Context): The context of the command.
+            error (CommandError): The error that was raised.
         """
         if isinstance(error, commands.CommandOnCooldown):
             minutes, seconds = divmod(error.retry_after, 60)

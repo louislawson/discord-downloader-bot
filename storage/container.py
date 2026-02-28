@@ -1,3 +1,5 @@
+"""Azure Container Blob service module"""
+
 from datetime import datetime, timedelta, timezone
 import os
 from typing import Dict
@@ -15,30 +17,21 @@ class ContainerRepository:
     """
     A wrapper class for async interactions with Azure Blob Storage containers.
 
-    This class provides high-level methods for listing, querying, uploading, and
-    deleting blobs using an injected `ContainerClient`. It supports blob metadata,
-    tags, and content settings, and includes internal validation for tag constraints.
+    This class provides high-level methods for uploading and generating SAS URLs
+    using an injected `ContainerClient`.
 
     Attributes:
         con_client (ContainerClient): The Azure Blob Storage container client.
 
     Methods:
-        list(): Lists blobs in the container with optional filters and metadata.
-        get(): Queries blobs by tag expressions.
         create(): Uploads a new blob with optional metadata, tags, etc..
-        delete(): Deletes one or more blobs from the container.
         sas_url(): Generate a SAS URL for a given blob.
     """
 
     def __init__(
         self,
     ) -> None:
-        """
-        Initializes the Container with a ContainerClient instance.
-
-        Args:
-            con_client (ContainerClient): The Azure Blob Storage container client.
-        """
+        """Initializes the Container with a ContainerClient instance."""
         self.con_client = ContainerClient.from_connection_string(
             conn_str=os.getenv("ST_CONN_STR"),
             container_name=os.getenv("ST_CONTAINER"),
@@ -93,8 +86,8 @@ class ContainerRepository:
 
         Args:
             blob_client (BlobClient): BlobClient to generate a SAS for.
-            valid_from (datetime): SAS token valid from datetime.
-            valid_to (datetime): SAS token valid to datetime.
+            valid_from (datetime, optional): SAS token valid from datetime.
+            valid_to (datetime, optional): SAS token valid to datetime.
 
         Returns:
             str: The blob SAS URL.

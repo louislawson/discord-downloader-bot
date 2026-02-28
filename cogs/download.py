@@ -1,3 +1,5 @@
+"""Download commands cog."""
+
 from io import BytesIO
 import json
 import os
@@ -12,6 +14,14 @@ from storage.container import ContainerRepository
 
 
 class Download(commands.Cog, name="download"):
+    """
+    Download commands cog.
+
+    Attributes:
+        bot (DiscordBot): DiscordBot instance.
+        allowed_media_types (List[str]): List of allowed media types.
+    """
+
     def __init__(self, bot) -> None:
         self.bot = bot
         self.allowed_media_types: List[str] = json.loads(
@@ -19,6 +29,15 @@ class Download(commands.Cog, name="download"):
         )
 
     def is_allowed_media_type(self, media_type: str) -> bool:
+        """
+        Tests a content-type against a list of allowed types.
+
+        Args:
+            media_type (str): Content-Type to test.
+
+        Returns:
+            bool: The result of the test.
+        """
         if media_type in self.allowed_media_types:
             return True
         return False
@@ -31,7 +50,8 @@ class Download(commands.Cog, name="download"):
         """
         Download all media in a channel.
 
-        :param context: The application command context.
+        Args:
+            context (Context): The command context.
         """
         await context.defer()
 
@@ -94,4 +114,10 @@ class Download(commands.Cog, name="download"):
 
 
 async def setup(bot) -> None:
+    """
+    Used to load this cog into a Bot.
+
+    Args:
+        bot (DiscordBot): The bot instance to load this cog.
+    """
     await bot.add_cog(Download(bot))
