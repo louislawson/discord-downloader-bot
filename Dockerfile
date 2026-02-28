@@ -83,6 +83,9 @@ RUN pip install --user --no-index --find-links=/bot/wheels -r /bot/requirements.
 # Set up tini
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=20s --start-interval=10s \
+  CMD discordhealthcheck || exit 1
+
 # And this will be the command that gets ran
 # This is the first one after tini that will get ran
 CMD ["/bot/start.sh"]
