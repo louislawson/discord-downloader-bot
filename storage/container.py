@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import os
 from typing import Dict
 
@@ -9,8 +9,6 @@ from azure.storage.blob import (
     generate_blob_sas,
 )
 from azure.storage.blob.aio import BlobClient, ContainerClient
-
-from storage.util import datetime_now, datetime_plus_one_hour
 
 
 class ContainerRepository:
@@ -87,8 +85,8 @@ class ContainerRepository:
     async def sas_url(
         self,
         blob_client: BlobClient,
-        valid_from: datetime = datetime_now(),
-        valid_to: datetime = datetime_plus_one_hour(),
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> str:
         """
         Generates a SAS URL for a blob.
@@ -101,6 +99,11 @@ class ContainerRepository:
         Returns:
             str: The blob SAS URL.
         """
+        if not valid_from:
+            valid_from = datetime.now(timezone.utc)
+        if not valid_to:
+            valid_to = datetime.now(timezone.utc) + timedelta(hours=1)
+
         sas_token = generate_blob_sas(
             account_name=self.con_client.account_name,
             container_name=self.con_client.container_name,
