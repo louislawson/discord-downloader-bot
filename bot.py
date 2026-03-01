@@ -8,6 +8,7 @@ import random
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
+import discordhealthcheck
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -84,6 +85,7 @@ class DiscordBot(commands.Bot):
         logger (Logger): Logger instance for this bot.
         bot_prefix (str): Bot command prefix.
         invite_link (str): Bot invite link.
+        healthcheck_server (Server): Health check server instance.
     """
 
     def __init__(self) -> None:
@@ -96,6 +98,7 @@ class DiscordBot(commands.Bot):
         self.logger = logger
         self.bot_prefix = os.getenv("PREFIX")
         self.invite_link = os.getenv("INVITE_LINK")
+        self.healthcheck_server = None
 
     async def load_cogs(self) -> None:
         """
@@ -155,6 +158,11 @@ class DiscordBot(commands.Bot):
         self.logger.info("-------------------")
         await self.load_cogs()
         self.status_task.start()
+        self.healthcheck_server = await discordhealthcheck.start(self)
+
+    async def close(self):
+        await self.healthcheck_server.wait_closed()
+        await super().close()
 
     # pylint: disable=arguments-differ
     async def on_message(self, message: discord.Message) -> None:
