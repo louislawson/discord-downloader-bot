@@ -1,5 +1,6 @@
 """Download commands cog."""
 
+from datetime import datetime
 from io import BytesIO
 import json
 import os
@@ -55,6 +56,9 @@ class Download(commands.Cog, name="download"):
         """
         await context.defer()
 
+        image_count: int = 0
+        video_count: int = 0
+
         attachments: List[Tuple[str, BytesIO]] = []
         async for message in context.channel.history(limit=None):
             self.bot.logger.debug(message.id)
@@ -63,6 +67,10 @@ class Download(commands.Cog, name="download"):
                     self.bot.logger.debug(attachment.filename)
                     self.bot.logger.debug(attachment.content_type)
                     self.bot.logger.debug(attachment.size)
+                    if "image" in attachment.content_type:
+                        image_count += 1
+                    if "video" in attachment.content_type:
+                        video_count += 1
                     att_buffer = BytesIO()
                     await attachment.save(att_buffer)
                     att_buffer.seek(0)
@@ -105,10 +113,15 @@ class Download(commands.Cog, name="download"):
 
         self.bot.logger.debug("Formatting embed")
         embed = discord.Embed(
-            title="Channel Media",
-            description=f"Click to download channel media {sas_url}",
-            color=discord.Color.green(),
+            title="Channel Media Download",
+            description=f"[Download channel media]({sas_url})",
+            colour=discord.Color.green(),
+            timestamp=datetime.now(),
         )
+        embed.set_author(name="Downloader Bot")
+        embed.add_field(name="Images", value=str(image_count), inline=True)
+        embed.add_field(name="Videos", value=str(video_count), inline=True)
+        embed.set_footer(text=f"Requested by {context.interaction.user}")
         self.bot.logger.debug("Sending followup message")
         await context.interaction.followup.send(embed=embed)
 
