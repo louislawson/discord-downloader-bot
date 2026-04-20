@@ -47,14 +47,15 @@ class Download(commands.Cog, name="download"):
         name="download",
         description="Download all media in a channel.",
     )
-    async def download(self, context: Context) -> None:
+    async def download(self, context: Context, only_me: bool = False) -> None:
         """
         Download all media in a channel.
 
         Args:
             context (Context): The command context.
+            only_me (bool): Only show the download link to you?
         """
-        await context.defer()
+        await context.defer(ephemeral=only_me)
 
         image_count: int = 0
         video_count: int = 0
@@ -123,7 +124,7 @@ class Download(commands.Cog, name="download"):
         embed.add_field(name="Videos", value=str(video_count), inline=True)
         embed.set_footer(text=f"Requested by {context.interaction.user}")
         self.bot.logger.debug("Sending followup message")
-        await context.interaction.followup.send(embed=embed)
+        await context.interaction.followup.send(embed=embed, ephemeral=only_me)
 
 
 async def setup(bot) -> None:
