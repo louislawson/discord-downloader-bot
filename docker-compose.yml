@@ -3,11 +3,12 @@ services:
     build:
       context: .
       dockerfile: ./Dockerfile
+      target: dev
       tags:
-        - downloader-bot:latest
+        - downloader-bot-dev:latest
     volumes:
       # Adds current directory as volume.
-      - .:/app/src/
+      - .:/bot/
     env_file:
       - .env
     depends_on:

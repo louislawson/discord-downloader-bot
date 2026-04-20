@@ -17,7 +17,6 @@ RUN apt update \
   ca-certificates
 
 # Here we'll create a working directory and cd into it
-
 WORKDIR /bot
 
 # Copy over the requirements.txt from the base of the repo
@@ -29,11 +28,47 @@ COPY /requirements.txt /bot/
 RUN pip wheel --wheel-dir=/bot/wheels -r requirements.txt
 
 ####################################################################################################
+## Dev image
+####################################################################################################
+
+# Use the same base image again
+FROM python:3.12.12-slim-trixie AS dev
+
+# Install dev tools
+RUN apt update \
+  && apt install -y --no-install-recommends \
+  ca-certificates \
+  bash
+
+# Copy over the requirements.txt from the base of the repo
+COPY /requirements.txt /bot/
+
+# Copy over our wheels from the builder stage
+COPY --from=builder /bot/wheels /bot/wheels
+
+# Upgrade both pip and setuptools to the latest version. This will fix any issues with installing the wheels, and is good practice to do this as well
+RUN pip install --upgrade pip setuptools
+
+# Now we finally install all of our dependencies
+RUN pip install --user --no-index --find-links=/bot/wheels -r /bot/requirements.txt
+
+# Install the watchfiles to make dev change reloads possible
+RUN pip install watchfiles==1.1.1
+
+# Run the app with watchfiles to enable auto-reload on code base change
+#   The '--filter' is used to instruct watchfiles to only reload on python
+#   changes in these locations: "/bot/cogs", "/bot/storage", "/bot/bot.py"
+# See https://watchfiles.helpmanual.io/cli/#running-and-restarting-a-command
+CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/bot.py"]
+
+STOPSIGNAL SIGTERM
+
+####################################################################################################
 ## Final image
 ####################################################################################################
 
 # Use the same base image again
-FROM python:3.12.12-slim-trixie
+FROM python:3.12.12-slim-trixie AS prod
 
 # Install any non-build tool packages, and just the stuff needed to run
 # Tini - Our PID1 for this container, which will be the init. Tini prevents creating zombie processes and forwards signals properly
@@ -75,7 +110,6 @@ USER discordbot
 # This is to add any executeables that is needed for any programs to run. Normally if you are running a web app w/ gunicorn, you'll need this step
 # But we don't need it for this bot, but we'll have it here to stop pip from complaining again
 ENV PATH="${PATH}:/home/discordbot/.local/bin"
-
 
 # Now we finally install all of our  dependencies
 RUN pip install --user --no-index --find-links=/bot/wheels -r /bot/requirements.txt
