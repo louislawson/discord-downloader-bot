@@ -107,7 +107,7 @@ class Download(commands.Cog, name="download"):
             file_obj.close()
         zip_buffer.close()
 
-        self.bot.logger.debug("Closing ContainterClient")
+        self.bot.logger.debug("Closing ContainerClient")
         await container.con_client.close()
 
         self.bot.logger.debug("Formatting embed")
