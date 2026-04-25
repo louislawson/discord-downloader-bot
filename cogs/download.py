@@ -45,6 +45,7 @@ class Download(commands.Cog, name="download"):
         name="download",
         description="Download all media in a channel.",
     )
+    @commands.max_concurrency(number=1, per=commands.BucketType.channel)
     async def download(self, context: Context, only_me: bool = False) -> None:
         """
         Download all media in a channel.
