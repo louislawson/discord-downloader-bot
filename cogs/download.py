@@ -4,7 +4,7 @@ from datetime import datetime
 from io import BytesIO
 import json
 import os
-from typing import List, Tuple
+from typing import List
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import discord
@@ -58,58 +58,59 @@ class Download(commands.Cog, name="download"):
         image_count: int = 0
         video_count: int = 0
 
-        attachments: List[Tuple[str, BytesIO]] = []
-        async for message in context.channel.history(limit=None):
-            self.bot.logger.debug(message.id)
-            for index, attachment in enumerate(message.attachments):
-                if self.is_allowed_media_type(attachment.content_type):
-                    filename = f"{index}_{attachment.filename}"
-                    self.bot.logger.debug(attachment.filename)
-                    self.bot.logger.debug(attachment.content_type)
-                    self.bot.logger.debug(attachment.size)
-                    if "image" in attachment.content_type:
-                        image_count += 1
-                    if "video" in attachment.content_type:
-                        video_count += 1
-                    att_buffer = BytesIO()
-                    await attachment.save(att_buffer)
-                    att_buffer.seek(0)
-                    attachments.append((filename, att_buffer))
-                self.bot.logger.debug("------------------------------")
-
-        self.bot.logger.debug("Creating zip file of attachments")
         zip_buffer = BytesIO()
         with ZipFile(zip_buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
-            for filename, file_obj in attachments:
-                self.bot.logger.debug("Adding %s to zipfile", filename)
-                zip_file.writestr(filename, file_obj.getvalue())
+            async for message in context.channel.history(limit=None):
+                for attachment in message.attachments:
+                    if self.is_allowed_media_type(attachment.content_type):
+                        if "image" in attachment.content_type:
+                            image_count += 1
+                        if "video" in attachment.content_type:
+                            video_count += 1
+                        att_buffer = BytesIO()
+                        await attachment.save(att_buffer)
+                        zip_file.writestr(
+                            f"{message.id}_{attachment.filename}",
+                            att_buffer.getvalue(),
+                        )
+                        att_buffer.close()
+
         zip_buffer.seek(0)
 
         zip_filename = f"{context.channel.name}-media.zip"
 
         self.bot.logger.debug("Creating ContainerRepository instance")
         container = ContainerRepository()
+        try:
+            self.bot.logger.debug("Uploading zip file as new blob")
+            blob_client = await container.create(
+                name=zip_filename,
+                data=zip_buffer,
+                overwrite=True,
+            )
 
-        self.bot.logger.debug("Uploading zip file as new blob")
-        blob_client = await container.create(
-            name=zip_filename,
-            data=zip_buffer,
-            overwrite=True,
-        )
-        self.bot.logger.debug("Generating SAS url for blob")
-        sas_url = await container.sas_url(blob_client)
-        # Required in dev environment as URL changes between Docker and Intranet
-        if os.getenv("ENVIRONMENT") == "dev":
-            self.bot.logger.debug("Dev environment requires URL change")
-            sas_url = sas_url.replace(os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL"))
+            self.bot.logger.debug("Generating SAS url for blob")
+            sas_url = await container.sas_url(blob_client)
 
-        self.bot.logger.debug("Closing zip and file buffers")
-        for _, file_obj in attachments:
-            file_obj.close()
-        zip_buffer.close()
+            if os.getenv("ENVIRONMENT") == "dev":
+                sas_url = sas_url.replace(
+                    os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
+                )
 
-        self.bot.logger.debug("Closing ContainerClient")
-        await container.con_client.close()
+        except Exception:
+            self.bot.logger.exception("Failed to upload zip or generate SAS URL")
+            error_embed = discord.Embed(
+                title="Download failed",
+                description="Something went wrong uploading the media. Please try again later.",
+                colour=discord.Color.red(),
+                timestamp=datetime.now(),
+            )
+            await context.send(embed=error_embed, ephemeral=only_me)
+            return
+
+        finally:
+            zip_buffer.close()
+            await container.con_client.close()
 
         self.bot.logger.debug("Formatting embed")
         embed = discord.Embed(
@@ -121,9 +122,8 @@ class Download(commands.Cog, name="download"):
         embed.set_author(name="Downloader Bot")
         embed.add_field(name="Images", value=str(image_count), inline=True)
         embed.add_field(name="Videos", value=str(video_count), inline=True)
-        embed.set_footer(text=f"Requested by {context.interaction.user}")
-        self.bot.logger.debug("Sending followup message")
-        await context.interaction.followup.send(embed=embed, ephemeral=only_me)
+        embed.set_footer(text=f"Requested by {context.author}")
+        await context.send(embed=embed, ephemeral=only_me)
 
 
 async def setup(bot) -> None:
