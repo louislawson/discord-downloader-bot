@@ -26,7 +26,7 @@ class Download(commands.Cog, name="download"):
     def __init__(self, bot) -> None:
         self.bot = bot
         self.allowed_media_types: List[str] = json.loads(
-            os.getenv("ALLOWED_MEDIA_TYPES")
+            os.getenv("ALLOWED_MEDIA_TYPES", '[]')
         )
 
     def is_allowed_media_type(self, media_type: str) -> bool:
