@@ -157,8 +157,8 @@ class DiscordBot(commands.Bot):
         )
         self.logger.info("-------------------")
         await self.load_cogs()
-        self.status_task.start()
         self.healthcheck_server = await discordhealthcheck.start(self)
+        self.status_task.start()
 
     async def close(self):
         await self.healthcheck_server.wait_closed()
