@@ -80,6 +80,16 @@ class Download(commands.Cog, name="download"):
 
         zip_filename = f"{context.channel.name}-media.zip"
 
+        if image_count == 0 and video_count == 0:
+            no_media_embed = discord.Embed(
+                title="No media found in channel",
+                description="No media found in this channel.",
+                colour=discord.Color.red(),
+                timestamp=datetime.now(),
+            )
+            await context.send(embed=no_media_embed, ephemeral=only_me)
+            return
+
         self.bot.logger.debug("Creating ContainerRepository instance")
         container = ContainerRepository()
         try:
