@@ -61,8 +61,9 @@ class Download(commands.Cog, name="download"):
         attachments: List[Tuple[str, BytesIO]] = []
         async for message in context.channel.history(limit=None):
             self.bot.logger.debug(message.id)
-            for attachment in message.attachments:
+            for index, attachment in enumerate(message.attachments):
                 if self.is_allowed_media_type(attachment.content_type):
+                    filename = f"{index}_{attachment.filename}"
                     self.bot.logger.debug(attachment.filename)
                     self.bot.logger.debug(attachment.content_type)
                     self.bot.logger.debug(attachment.size)
@@ -73,7 +74,7 @@ class Download(commands.Cog, name="download"):
                     att_buffer = BytesIO()
                     await attachment.save(att_buffer)
                     att_buffer.seek(0)
-                    attachments.append((attachment.filename, att_buffer))
+                    attachments.append((filename, att_buffer))
                 self.bot.logger.debug("------------------------------")
 
         self.bot.logger.debug("Creating zip file of attachments")
