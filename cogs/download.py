@@ -39,9 +39,7 @@ class Download(commands.Cog, name="download"):
         Returns:
             bool: The result of the test.
         """
-        if media_type in self.allowed_media_types:
-            return True
-        return False
+        return media_type in self.allowed_media_types
 
     @commands.hybrid_command(
         name="download",
