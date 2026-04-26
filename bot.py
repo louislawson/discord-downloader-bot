@@ -11,6 +11,8 @@ from discord.ext.commands import Context, errors
 import discordhealthcheck
 from dotenv import load_dotenv
 
+from storage.exceptions import BlobUploadError, ContainerConfigError, SasGenerationError
+
 load_dotenv()
 
 intents = discord.Intents.default()
@@ -69,8 +71,6 @@ logger.setLevel(os.getenv("LOGGING_LEVEL", "INFO"))
 # Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(LoggingFormatter())
-
-# Add the handlers
 logger.addHandler(console_handler)
 
 
@@ -101,9 +101,7 @@ class DiscordBot(commands.Bot):
         self.healthcheck_server = None
 
     async def load_cogs(self) -> None:
-        """
-        The code in this function is executed whenever the bot will start.
-        """
+        """Load all cog extensions from the /cogs directory."""
         for file in os.listdir(f"{os.path.realpath(os.path.dirname(__file__))}/cogs"):
             if file.endswith(".py"):
                 extension = file[:-3]
@@ -111,41 +109,31 @@ class DiscordBot(commands.Bot):
                     await self.load_extension(f"cogs.{extension}")
                     self.logger.info("Loaded extension '%s'", extension)
                 except errors.ExtensionNotFound as e:
-                    exception = f"{type(e).__name__}: {e}"
                     self.logger.error(
-                        "Couldn't find extension %s\n%s", extension, exception
+                        "Couldn't find extension '%s': %s", extension, e
                     )
                 except errors.ExtensionAlreadyLoaded as e:
-                    exception = f"{type(e).__name__}: {e}"
                     self.logger.error(
-                        "Extension already loaded %s\n%s", extension, exception
+                        "Extension already loaded '%s': %s", extension, e
                     )
                 except errors.NoEntryPointError as e:
-                    exception = f"{type(e).__name__}: {e}"
                     self.logger.error(
-                        "Extension does not have entry point %s\n%s",
-                        extension,
-                        exception,
+                        "Extension has no setup() entry point '%s': %s", extension, e
                     )
                 except errors.ExtensionFailed as e:
-                    exception = f"{type(e).__name__}: {e}"
                     self.logger.error(
-                        "Failed to load extension %s\n%s", extension, exception
+                        "Extension '%s' raised an error during load: %s", extension, e
                     )
 
     @tasks.loop(minutes=1.0)
     async def status_task(self) -> None:
-        """
-        Setup the game status task of the bot.
-        """
+        """Cycle the bot's presence status."""
         statuses = ["with you!"]
         await self.change_presence(activity=discord.Game(random.choice(statuses)))
 
     @status_task.before_loop
     async def before_status_task(self) -> None:
-        """
-        Before starting the status changing task, we make sure the bot is ready
-        """
+        """Wait until the bot is ready before starting the status loop."""
         await self.wait_until_ready()
 
     async def setup_hook(self) -> None:
@@ -167,7 +155,7 @@ class DiscordBot(commands.Bot):
     # pylint: disable=arguments-differ
     async def on_message(self, message: discord.Message) -> None:
         """
-        Executed every time someone sends a message.
+        Process commands from non-bot users.
 
         Args:
             message (Message): The message that was sent.
@@ -178,17 +166,15 @@ class DiscordBot(commands.Bot):
 
     async def on_command_completion(self, context: Context) -> None:
         """
-        Executed every time a normal command has been *successfully* executed.
+        Log successfully executed commands.
 
         Args:
             context (Context): The context of the command.
         """
-        full_command_name = context.command.qualified_name
-        split = full_command_name.split(" ")
-        executed_command = str(split[0])
+        executed_command = context.command.qualified_name.split(" ")[0]
         if context.guild is not None:
             self.logger.info(
-                "Executed %s command in %s (ID: %s) by %s (ID: %s)",
+                "Executed '%s' in '%s' (ID: %s) by %s (ID: %s)",
                 executed_command,
                 context.guild.name,
                 context.guild.id,
@@ -197,7 +183,7 @@ class DiscordBot(commands.Bot):
             )
         else:
             self.logger.info(
-                "Executed %s command by %s (ID: %s) in DMs",
+                "Executed '%s' by %s (ID: %s) in DMs",
                 executed_command,
                 context.author,
                 context.author.id,
@@ -209,29 +195,86 @@ class DiscordBot(commands.Bot):
         error: errors.CommandError,
     ) -> None:
         """
-        Executed every time a normal valid command catches an error.
+        Global command error handler. Sends a user-facing embed for known error
+        types and re-raises anything unexpected so it surfaces in logs.
 
         Args:
             context (Context): The context of the command.
             error (CommandError): The error that was raised.
         """
+        # Unwrap CheckFailure wrappers so we can inspect the original cause
+        original = getattr(error, "original", error)
+
+        # ------------------------------------------------------------------ #
+        # Storage / configuration errors (from storage.exceptions)            #
+        # ------------------------------------------------------------------ #
+        if isinstance(original, ContainerConfigError):
+            self.logger.critical(
+                "Storage misconfiguration detected: %s", original
+            )
+            embed = discord.Embed(
+                description=(
+                    "The bot's storage backend is not configured correctly. "
+                    "Please contact an administrator."
+                ),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if isinstance(original, BlobUploadError):
+            self.logger.error("Blob upload error: %s", original)
+            embed = discord.Embed(
+                description=(
+                    "The media archive could not be uploaded to storage. "
+                    "Please try again later."
+                ),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        if isinstance(original, SasGenerationError):
+            self.logger.error("SAS generation error: %s", original)
+            embed = discord.Embed(
+                description=(
+                    "A download link could not be generated for the media archive. "
+                    "Please contact an administrator."
+                ),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        # ------------------------------------------------------------------ #
+        # Discord / command framework errors                                  #
+        # ------------------------------------------------------------------ #
         if isinstance(error, commands.CommandOnCooldown):
             minutes, seconds = divmod(error.retry_after, 60)
             hours, minutes = divmod(minutes, 60)
             hours = hours % 24
+            parts = []
+            if round(hours) > 0:
+                parts.append(f"{round(hours)} hours")
+            if round(minutes) > 0:
+                parts.append(f"{round(minutes)} minutes")
+            if round(seconds) > 0:
+                parts.append(f"{round(seconds)} seconds")
             embed = discord.Embed(
-                description=f"**Please slow down** - You can use this command again in {f'{round(hours)} hours' if round(hours) > 0 else ''} {f'{round(minutes)} minutes' if round(minutes) > 0 else ''} {f'{round(seconds)} seconds' if round(seconds) > 0 else ''}.",
+                description=f"**Please slow down** — you can use this command again in {', '.join(parts)}.",
                 color=0xE02B2B,
             )
             await context.send(embed=embed)
+
         elif isinstance(error, commands.NotOwner):
             embed = discord.Embed(
-                description="You are not the owner of the bot!", color=0xE02B2B
+                description="You are not the owner of the bot!",
+                color=0xE02B2B,
             )
             await context.send(embed=embed)
             if context.guild:
                 self.logger.warning(
-                    "%s (ID: %s) tried to execute an owner only command in the guild %s (ID: %s).",
+                    "%s (ID: %s) tried to execute an owner-only command in '%s' (ID: %s).",
                     context.author,
                     context.author.id,
                     context.guild.name,
@@ -239,35 +282,88 @@ class DiscordBot(commands.Bot):
                 )
             else:
                 self.logger.warning(
-                    "%s (ID: %s) tried to execute an owner only command in the bot's DMs.",
+                    "%s (ID: %s) tried to execute an owner-only command in DMs.",
                     context.author,
                     context.author.id,
                 )
+
         elif isinstance(error, commands.MissingPermissions):
             embed = discord.Embed(
-                description="You are missing the permission(s) `"
-                + ", ".join(error.missing_permissions)
-                + "` to execute this command!",
+                description=(
+                    "You are missing the permission(s) `"
+                    + ", ".join(error.missing_permissions)
+                    + "` to execute this command!"
+                ),
                 color=0xE02B2B,
             )
             await context.send(embed=embed)
+
         elif isinstance(error, commands.BotMissingPermissions):
+            self.logger.warning(
+                "Bot is missing permissions %s to run '%s' in channel '%s'.",
+                error.missing_permissions,
+                context.command,
+                context.channel,
+            )
             embed = discord.Embed(
-                description="I am missing the permission(s) `"
-                + ", ".join(error.missing_permissions)
-                + "` to fully perform this command!",
+                description=(
+                    "I am missing the permission(s) `"
+                    + ", ".join(error.missing_permissions)
+                    + "` to fully perform this command!"
+                ),
                 color=0xE02B2B,
             )
             await context.send(embed=embed)
+
         elif isinstance(error, commands.MissingRequiredArgument):
             embed = discord.Embed(
-                title="Error!",
+                title="Missing argument",
                 description=str(error).capitalize(),
                 color=0xE02B2B,
             )
             await context.send(embed=embed)
+
+        elif isinstance(error, commands.BadArgument):
+            embed = discord.Embed(
+                title="Invalid argument",
+                description=str(error).capitalize(),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+
+        elif isinstance(error, commands.MaxConcurrencyReached):
+            embed = discord.Embed(
+                description=(
+                    "This command is already running in this channel. "
+                    "Please wait for it to finish before running it again."
+                ),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+
+        elif isinstance(error, commands.CommandNotFound):
+            # Silently ignore unknown commands — no need to log or respond.
+            return
+
         else:
-            raise error
+            # Genuinely unexpected — log the full traceback and let the user
+            # know something went wrong without exposing internal details.
+            self.logger.exception(
+                "Unhandled error in command '%s' invoked by %s (ID: %s): %s",
+                context.command,
+                context.author,
+                context.author.id,
+                error,
+            )
+            embed = discord.Embed(
+                title="Unexpected error",
+                description=(
+                    "An unexpected error occurred while running this command. "
+                    "Please try again later, or contact an administrator if this keeps happening."
+                ),
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
 
 
 bot = DiscordBot()
