@@ -1,5 +1,5 @@
 aiohttp
 discord.py==2.6.4
-python-dotenv
+pydantic-settings==2.14.0
 azure-storage-blob==12.28.0
 discordhealthcheck==0.1.1

@@ -2,15 +2,13 @@
 
 from datetime import datetime
 from io import BytesIO
-import json
-import os
-from typing import List
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 
+from config import settings
 from storage.container import ContainerRepository
 from storage.exceptions import BlobUploadError, ContainerConfigError, SasGenerationError
 
@@ -109,14 +107,12 @@ class Download(commands.Cog, name="download"):
 
     Attributes:
         bot (DiscordBot): DiscordBot instance.
-        allowed_media_types (List[str]): List of allowed media types.
+        allowed_media_types (list[str]): List of allowed media types.
     """
 
     def __init__(self, bot) -> None:
         self.bot = bot
-        self.allowed_media_types: List[str] = json.loads(
-            os.getenv("ALLOWED_MEDIA_TYPES", "[]")
-        )
+        self.allowed_media_types: list[str] = settings.ALLOWED_MEDIA_TYPES
 
     def is_allowed_media_type(self, media_type: str) -> bool:
         """
@@ -253,9 +249,9 @@ class Download(commands.Cog, name="download"):
                     blob_url=blob_client.url,
                 )
 
-                if os.getenv("ENVIRONMENT") == "dev":
+                if settings.ENVIRONMENT == "dev":
                     sas_url = sas_url.replace(
-                        os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
+                        settings.ST_INT_URL, settings.ST_EXT_URL
                     )
 
         except ContainerConfigError:

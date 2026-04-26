@@ -1,7 +1,6 @@
 """Azure Container Blob service module."""
 
 from datetime import datetime, timedelta, timezone
-import os
 from typing import Dict
 
 from azure.core.exceptions import AzureError
@@ -13,37 +12,15 @@ from azure.storage.blob import (
 )
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
-from storage.exceptions import BlobUploadError, ContainerConfigError, SasGenerationError
+from config import settings
+from storage.exceptions import BlobUploadError, SasGenerationError
 
 
-def _build_client_from_env() -> ContainerClient:
-    """
-    Build a ContainerClient from environment variables, validating that the
-    required variables are present before attempting a connection.
-
-    Returns:
-        ContainerClient: A configured container client.
-
-    Raises:
-        ContainerConfigError: If required environment variables are missing.
-    """
-    conn_str = os.getenv("ST_CONN_STR")
-    container = os.getenv("ST_CONTAINER")
-
-    if not conn_str:
-        raise ContainerConfigError(
-            "Missing required environment variable: ST_CONN_STR. "
-            "Ensure the storage connection string is set before starting the bot."
-        )
-    if not container:
-        raise ContainerConfigError(
-            "Missing required environment variable: ST_CONTAINER. "
-            "Ensure the target container name is set before starting the bot."
-        )
-
+def _build_client() -> ContainerClient:
+    """Build a ContainerClient from the centralised settings object."""
     return ContainerClient.from_connection_string(
-        conn_str=conn_str,
-        container_name=container,
+        conn_str=settings.ST_CONN_STR,
+        container_name=settings.ST_CONTAINER,
     )
 
 
@@ -52,8 +29,8 @@ class ContainerRepository:
     A wrapper class for async interactions with Azure Blob Storage containers.
 
     Supports dependency injection of a ``ContainerClient`` for testability. If
-    no client is provided, one is built from environment variables, with
-    validation at instantiation time rather than at first use.
+    no client is provided, one is built from the centralised ``settings``
+    object (which validates required values at startup).
 
     All Azure errors are caught and re-raised as domain-specific exceptions
     (``BlobUploadError``, ``SasGenerationError``) so callers can handle
@@ -61,7 +38,7 @@ class ContainerRepository:
 
     Usage::
 
-        # Production — reads from environment variables
+        # Production — reads from settings
         async with ContainerRepository() as repo:
             blob_client = await repo.create(name="file.zip", data=data)
             url = await repo.sas_url(blob_client.blob_name, blob_client.url)
@@ -80,13 +57,9 @@ class ContainerRepository:
 
         Args:
             client (ContainerClient, optional): An injected container client.
-                If omitted, one is built from environment variables.
-
-        Raises:
-            ContainerConfigError: If building from env vars and required
-                variables are missing.
+                If omitted, one is built from settings.
         """
-        self.con_client: ContainerClient = client or _build_client_from_env()
+        self.con_client: ContainerClient = client or _build_client()
 
     async def __aenter__(self) -> "ContainerRepository":
         return self

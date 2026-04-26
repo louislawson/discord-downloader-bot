@@ -9,11 +9,9 @@ import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
 import discordhealthcheck
-from dotenv import load_dotenv
 
+from config import settings
 from storage.exceptions import BlobUploadError, ContainerConfigError, SasGenerationError
-
-load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -66,7 +64,7 @@ class LoggingFormatter(logging.Formatter):
 
 
 logger = logging.getLogger("discord_bot")
-logger.setLevel(os.getenv("LOGGING_LEVEL", "INFO"))
+logger.setLevel(settings.LOGGING_LEVEL)
 
 # Console handler
 console_handler = logging.StreamHandler()
@@ -91,13 +89,13 @@ class DiscordBot(commands.Bot):
     def __init__(self) -> None:
         """Initialise the DiscordBot."""
         super().__init__(
-            command_prefix=commands.when_mentioned_or(os.getenv("PREFIX")),
+            command_prefix=commands.when_mentioned_or(settings.PREFIX),
             intents=intents,
             help_command=None,
         )
         self.logger = logger
-        self.bot_prefix = os.getenv("PREFIX")
-        self.invite_link = os.getenv("INVITE_LINK")
+        self.bot_prefix = settings.PREFIX
+        self.invite_link = settings.INVITE_LINK
         self.healthcheck_server = None
 
     async def load_cogs(self) -> None:
@@ -367,4 +365,4 @@ class DiscordBot(commands.Bot):
 
 
 bot = DiscordBot()
-bot.run(os.getenv("TOKEN"))
+bot.run(settings.TOKEN)
