@@ -37,6 +37,13 @@ class ContainerRepository:
             container_name=os.getenv("ST_CONTAINER"),
         )
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.con_client.close()
+        return False
+
     async def create(
         self,
         name: str,

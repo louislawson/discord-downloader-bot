@@ -91,37 +91,36 @@ class Download(commands.Cog, name="download"):
             return
 
         self.bot.logger.debug("Creating ContainerRepository instance")
-        container = ContainerRepository()
-        try:
-            self.bot.logger.debug("Uploading zip file as new blob")
-            blob_client = await container.create(
-                name=zip_filename,
-                data=zip_buffer,
-                overwrite=True,
-            )
-
-            self.bot.logger.debug("Generating SAS url for blob")
-            sas_url = await container.sas_url(blob_client)
-
-            if os.getenv("ENVIRONMENT") == "dev":
-                sas_url = sas_url.replace(
-                    os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
+        async with ContainerRepository() as container:
+            try:
+                self.bot.logger.debug("Uploading zip file as new blob")
+                blob_client = await container.create(
+                    name=zip_filename,
+                    data=zip_buffer,
+                    overwrite=True,
                 )
 
-        except Exception:
-            self.bot.logger.exception("Failed to upload zip or generate SAS URL")
-            error_embed = discord.Embed(
-                title="Download failed",
-                description="Something went wrong uploading the media. Please try again later.",
-                colour=discord.Color.red(),
-                timestamp=datetime.now(),
-            )
-            await context.send(embed=error_embed, ephemeral=only_me)
-            return
+                self.bot.logger.debug("Generating SAS url for blob")
+                sas_url = await container.sas_url(blob_client)
 
-        finally:
-            zip_buffer.close()
-            await container.con_client.close()
+                if os.getenv("ENVIRONMENT") == "dev":
+                    sas_url = sas_url.replace(
+                        os.getenv("ST_INT_URL"), os.getenv("ST_EXT_URL")
+                    )
+
+            except Exception:
+                self.bot.logger.exception("Failed to upload zip or generate SAS URL")
+                error_embed = discord.Embed(
+                    title="Download failed",
+                    description="Something went wrong while uploading the media archive. Please try again later.",
+                    colour=discord.Color.red(),
+                    timestamp=datetime.now(),
+                )
+                await context.send(embed=error_embed, ephemeral=only_me)
+                return
+
+            finally:
+                zip_buffer.close()
 
         self.bot.logger.debug("Formatting embed")
         embed = discord.Embed(
