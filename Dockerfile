@@ -59,7 +59,7 @@ RUN pip install watchfiles==1.1.1
 #   The '--filter' is used to instruct watchfiles to only reload on python
 #   changes in these locations: "/bot/cogs", "/bot/storage", "/bot/bot.py"
 # See https://watchfiles.helpmanual.io/cli/#running-and-restarting-a-command
-CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/bot.py"]
+CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/bot.py", "/bot/config.py"]
 
 STOPSIGNAL SIGTERM
 
@@ -83,6 +83,7 @@ RUN apt update \
 # We'll change or create the directory bot again, and copy any files we need for the bot to work
 # Copy over discord bot file and cogs
 COPY /bot.py /bot/bot.py
+COPY /config.py /bot/config.py
 COPY /cogs /bot/cogs
 COPY /storage /bot/storage
 COPY /requirements.txt /bot/
