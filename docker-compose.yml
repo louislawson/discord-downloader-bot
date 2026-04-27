@@ -16,6 +16,51 @@ services:
         condition: service_started
       azurite_init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: dev
+      tags:
+        - downloader-bot-dev:latest
+    volumes:
+      - .:/bot/
+    env_file:
+      - .env
+    # Override the dev image's bot CMD with the arq worker entrypoint, wrapped in
+    # watchfiles so worker code changes hot-reload the same way bot.py does.
+    command:
+      - watchfiles
+      - --filter
+      - python
+      - arq worker.main.WorkerSettings
+      - /bot/worker
+      - /bot/storage
+      - /bot/config.py
+      - /bot/queue_client.py
+    depends_on:
+      redis:
+        condition: service_healthy
+      azurite:
+        condition: service_started
+      azurite_init:
+        condition: service_completed_successfully
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      retries: 30
 
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:3.35.0
@@ -46,3 +91,6 @@ services:
     environment:
       # https://github.com/Azure/Azurite/blob/main/README.md#usage-with-azure-storage-sdks-or-tools
       AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
+
+volumes:
+  redis-data:

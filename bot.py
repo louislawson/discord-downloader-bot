@@ -9,9 +9,10 @@ import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
 import discordhealthcheck
+from arq.connections import ArqRedis
 
 from config import settings
-from storage.exceptions import BlobUploadError, ContainerConfigError, SasGenerationError
+from queue_client import open_pool
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -97,6 +98,7 @@ class DiscordBot(commands.Bot):
         self.bot_prefix = settings.PREFIX
         self.invite_link = settings.INVITE_LINK
         self.healthcheck_server = None
+        self.arq_pool: ArqRedis | None = None
 
     async def load_cogs(self) -> None:
         """Load all cog extensions from the /cogs directory."""
@@ -144,9 +146,13 @@ class DiscordBot(commands.Bot):
         self.logger.info("-------------------")
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
+        self.arq_pool = await open_pool()
+        self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
         self.status_task.start()
 
     async def close(self):
+        if self.arq_pool is not None:
+            await self.arq_pool.aclose()
         await self.healthcheck_server.wait_closed()
         await super().close()
 
@@ -200,53 +206,6 @@ class DiscordBot(commands.Bot):
             context (Context): The context of the command.
             error (CommandError): The error that was raised.
         """
-        # Unwrap CheckFailure wrappers so we can inspect the original cause
-        original = getattr(error, "original", error)
-
-        # ------------------------------------------------------------------ #
-        # Storage / configuration errors (from storage.exceptions)            #
-        # ------------------------------------------------------------------ #
-        if isinstance(original, ContainerConfigError):
-            self.logger.critical(
-                "Storage misconfiguration detected: %s", original
-            )
-            embed = discord.Embed(
-                description=(
-                    "The bot's storage backend is not configured correctly. "
-                    "Please contact an administrator."
-                ),
-                color=0xE02B2B,
-            )
-            await context.send(embed=embed)
-            return
-
-        if isinstance(original, BlobUploadError):
-            self.logger.error("Blob upload error: %s", original)
-            embed = discord.Embed(
-                description=(
-                    "The media archive could not be uploaded to storage. "
-                    "Please try again later."
-                ),
-                color=0xE02B2B,
-            )
-            await context.send(embed=embed)
-            return
-
-        if isinstance(original, SasGenerationError):
-            self.logger.error("SAS generation error: %s", original)
-            embed = discord.Embed(
-                description=(
-                    "A download link could not be generated for the media archive. "
-                    "Please contact an administrator."
-                ),
-                color=0xE02B2B,
-            )
-            await context.send(embed=embed)
-            return
-
-        # ------------------------------------------------------------------ #
-        # Discord / command framework errors                                  #
-        # ------------------------------------------------------------------ #
         if isinstance(error, commands.CommandOnCooldown):
             minutes, seconds = divmod(error.retry_after, 60)
             hours, minutes = divmod(minutes, 60)

@@ -33,5 +33,8 @@ class Settings(BaseSettings):
     ST_INT_URL: str | None = None
     ST_EXT_URL: str | None = None
 
+    # Redis / ARQ work queue
+    REDIS_URL: str = "redis://redis:6379/0"
+
 
 settings = Settings()

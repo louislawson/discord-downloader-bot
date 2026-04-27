@@ -87,6 +87,43 @@ class Owner(commands.Cog, name="owner"):
             )
             await context.send(embed=embed)
 
+    @commands.command(
+        name="queueping",
+        description="Smoke-test the work queue by enqueueing a noop job.",
+    )
+    @commands.is_owner()
+    async def queueping(self, context: Context) -> None:
+        """
+        Enqueue a noop job for round-trip verification of the work queue.
+
+        Args:
+            context (Context): The command context.
+        """
+        if self.bot.arq_pool is None:
+            embed = discord.Embed(
+                description="Queue is not connected — Redis pool is unavailable.",
+                color=0xE02B2B,
+            )
+            await context.send(embed=embed)
+            return
+
+        job = await self.bot.arq_pool.enqueue_job(
+            "noop_job",
+            {
+                "author": str(context.author),
+                "author_id": context.author.id,
+                "channel_id": context.channel.id,
+            },
+        )
+        embed = discord.Embed(
+            description=(
+                f"Enqueued `noop_job` (job_id `{job.job_id}`). "
+                "Check the worker logs to confirm it ran."
+            ),
+            color=0xBEBEFE,
+        )
+        await context.send(embed=embed)
+
 
 async def setup(bot) -> None:
     """

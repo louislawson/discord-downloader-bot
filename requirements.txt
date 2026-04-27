@@ -3,3 +3,4 @@ discord.py==2.6.4
 pydantic-settings==2.14.0
 azure-storage-blob==12.28.0
 discordhealthcheck==0.1.1
+arq==0.26.3
