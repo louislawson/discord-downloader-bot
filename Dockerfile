@@ -69,7 +69,7 @@ WORKDIR /bot
 #   The '--filter' is used to instruct watchfiles to only reload on python
 #   changes in these locations: "/bot/cogs", "/bot/storage", "/bot/bot.py"
 # See https://watchfiles.helpmanual.io/cli/#running-and-restarting-a-command
-CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/bot.py", "/bot/config.py", "/bot/queue_client.py"]
+CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/db", "/bot/bot.py", "/bot/config.py", "/bot/queue_client.py"]
 
 STOPSIGNAL SIGTERM
 
@@ -98,6 +98,7 @@ COPY /queue_client.py /bot/queue_client.py
 COPY /cogs /bot/cogs
 COPY /storage /bot/storage
 COPY /worker /bot/worker
+COPY /db /bot/db
 COPY /requirements.txt /bot/
 
 # Copy over our start shell file. This will be used to create environment variables for the token of the bot

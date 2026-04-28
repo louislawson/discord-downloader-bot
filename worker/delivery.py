@@ -9,9 +9,11 @@ of an already-delivered job does not double-send.
 import logging
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Literal
 
+import asyncpg
 import discord
+
+from db import guild_settings
 
 
 logger = logging.getLogger("downloader_bot.worker.delivery")
@@ -20,9 +22,6 @@ logger = logging.getLogger("downloader_bot.worker.delivery")
 # the worst-case ARQ retry window and then some — short enough that keys don't
 # accumulate forever.
 _DELIVERED_KEY_TTL_SECONDS = 86_400
-
-
-DeliveryMode = Literal["dm", "channel", "both"]
 
 
 @dataclass
@@ -62,22 +61,10 @@ async def _claim_delivery(redis_pool, job_id: str) -> bool:
     return bool(claimed)
 
 
-def _read_guild_settings_stub(
-    guild_id: int | None,
-) -> tuple[DeliveryMode, int | None]:
-    """
-    Phase 2 stub for guild settings.
-
-    Always returns ``('dm', None)`` until phase 3 wires the SQLite-backed
-    reader. This keeps the decision tree exercisable end-to-end without any
-    per-guild configuration in place yet.
-    """
-    return ("dm", None)
-
-
 async def deliver(
     discord_client: discord.Client,
     redis_pool,
+    db_pool: asyncpg.Pool,
     job_id: str,
     requester_id: int,
     guild_id: int | None,
@@ -94,14 +81,18 @@ async def deliver(
     - Otherwise the guild's mode decides:
         - ``dm``      → DM the requester; Forbidden → fail closed.
         - ``channel`` → post in the configured channel mentioning the
-          requester; if no channel set, log and stop.
+          requester. If no channel is configured, fall back to DM
+          (fail-closed on Forbidden — no public posting without a channel).
         - ``both``    → DM first; on Forbidden, fall back to the channel.
+          If no channel is configured and DM was blocked, drop with a
+          warning (DM was already attempted; no other route remains).
 
     Idempotent: a Redis-backed claim ensures ARQ retries don't double-deliver.
 
     Args:
         discord_client (discord.Client): REST-only client.
         redis_pool: ARQ Redis connection (``ctx['redis']``).
+        db_pool (asyncpg.Pool): Postgres pool used to read guild settings.
         job_id (str): Unique job id, used as the dedup key.
         requester_id (int): Discord user id who invoked the command.
         guild_id (int | None): Guild id (None for DM-context invocations).
@@ -119,7 +110,7 @@ async def deliver(
         )
         return
 
-    mode, channel_id = _read_guild_settings_stub(guild_id)
+    mode, channel_id = await guild_settings.get(db_pool, guild_id)
 
     if mode == "dm":
         await _try_dm(
@@ -131,8 +122,12 @@ async def deliver(
         if channel_id is None:
             logger.warning(
                 "Job %s: mode=channel but no results channel configured for "
-                "guild %s — dropping delivery",
+                "guild %s — falling back to DM",
                 job_id, guild_id,
+            )
+            await _try_dm(
+                discord_client, requester_id, payload,
+                fail_closed_reason="mode=channel, no channel configured",
             )
             return
         await _post_to_channel(discord_client, channel_id, requester_id, payload)

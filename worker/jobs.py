@@ -118,8 +118,8 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     deliver. ``deliver`` handles DM/channel routing and idempotency.
 
     Args:
-        ctx (dict): ARQ context. Reads ``discord_client`` (added by
-            ``on_startup``), ``redis``, and ``job_id``.
+        ctx (dict): ARQ context. Reads ``discord_client`` and ``db_pool``
+            (both added by ``on_startup``), ``redis``, and ``job_id``.
         payload (dict): Job payload (see ``cogs/download.py`` for shape).
 
     Returns:
@@ -127,6 +127,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     """
     discord_client: discord.Client = ctx["discord_client"]
     redis_pool = ctx["redis"]
+    db_pool = ctx["db_pool"]
     job_id: str = ctx["job_id"]
 
     channel_id = payload["channel_id"]
@@ -182,7 +183,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
             job_id, channel_id,
         )
         await deliver(
-            discord_client, redis_pool, job_id,
+            discord_client, redis_pool, db_pool, job_id,
             requester_id, guild_id, only_me,
             DeliveryPayload(embed=_error_embed(
                 "Missing permissions",
@@ -196,7 +197,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
             "Job %s: discord error during history walk: %s", job_id, e,
         )
         await deliver(
-            discord_client, redis_pool, job_id,
+            discord_client, redis_pool, db_pool, job_id,
             requester_id, guild_id, only_me,
             DeliveryPayload(embed=_error_embed(
                 "Discord error",
@@ -213,7 +214,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
             "Job %s: no allowed media found in channel %s", job_id, channel_id,
         )
         await deliver(
-            discord_client, redis_pool, job_id,
+            discord_client, redis_pool, db_pool, job_id,
             requester_id, guild_id, only_me,
             DeliveryPayload(embed=_error_embed(
                 "No media found",
@@ -245,7 +246,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     except ContainerConfigError:
         logger.exception("Job %s: storage misconfigured", job_id)
         await deliver(
-            discord_client, redis_pool, job_id,
+            discord_client, redis_pool, db_pool, job_id,
             requester_id, guild_id, only_me,
             DeliveryPayload(embed=_error_embed(
                 "Storage misconfigured",
@@ -294,7 +295,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     # --- Phase D: deliver the SAS link --------------------------------------
     try:
         await deliver(
-            discord_client, redis_pool, job_id,
+            discord_client, redis_pool, db_pool, job_id,
             requester_id, guild_id, only_me,
             DeliveryPayload(embed=_success_embed(
                 sas_url, image_count, video_count, requester_tag,

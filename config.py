@@ -36,5 +36,8 @@ class Settings(BaseSettings):
     # Redis / ARQ work queue
     REDIS_URL: str = "redis://redis:6379/0"
 
+    # Postgres (per-guild settings)
+    POSTGRES_DSN: str
+
 
 settings = Settings()

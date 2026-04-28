@@ -5,6 +5,7 @@ import os
 import platform
 import random
 
+import asyncpg
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
@@ -12,6 +13,7 @@ import discordhealthcheck
 from arq.connections import ArqRedis
 
 from config import settings
+from db.pool import init_schema, open_pool as open_db_pool
 from queue_client import open_pool
 
 intents = discord.Intents.default()
@@ -99,6 +101,7 @@ class DiscordBot(commands.Bot):
         self.invite_link = settings.INVITE_LINK
         self.healthcheck_server = None
         self.arq_pool: ArqRedis | None = None
+        self.db_pool: asyncpg.Pool | None = None
 
     async def load_cogs(self) -> None:
         """Load all cog extensions from the /cogs directory."""
@@ -144,6 +147,9 @@ class DiscordBot(commands.Bot):
             "Running on: %s %s (%s)", platform.system(), platform.release(), os.name
         )
         self.logger.info("-------------------")
+        self.db_pool = await open_db_pool()
+        await init_schema(self.db_pool)
+        self.logger.info("Connected to Postgres")
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
         self.arq_pool = await open_pool()
@@ -153,6 +159,8 @@ class DiscordBot(commands.Bot):
     async def close(self):
         if self.arq_pool is not None:
             await self.arq_pool.aclose()
+        if self.db_pool is not None:
+            await self.db_pool.close()
         await self.healthcheck_server.wait_closed()
         await super().close()
 
