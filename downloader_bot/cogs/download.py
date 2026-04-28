@@ -2,7 +2,7 @@
 
 The cog itself does no heavy lifting — it validates the request, enqueues a
 ``download_channel_media`` ARQ job, and acknowledges the user immediately.
-The worker (see ``worker/jobs.py``) runs the channel history walk, zips, and
+The worker (see ``downloader_bot/worker/jobs.py``) runs the channel history walk, zips, and
 delivery out-of-band, which avoids the 15-minute Discord interaction-token
 window and lets independent channels run in parallel.
 """
@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from config import settings
+from downloader_bot.config import settings
 
 
 def _queued_embed(job_id: str, only_me: bool) -> discord.Embed:

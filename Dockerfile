@@ -59,17 +59,18 @@ ENV PATH="${PATH}:/root/.local/bin"
 # Install the watchfiles to make dev change reloads possible
 RUN pip install watchfiles==1.1.1
 
-# arq's worker entrypoint resolves the ``worker.main`` module by importing it,
-# so the working directory needs to be on sys.path. Set it explicitly here so
-# both the bot CMD below and the worker compose service (which overrides this
-# CMD) find their imports.
+# arq's worker entrypoint resolves ``downloader_bot.worker.main`` by importing
+# it, so the directory containing the package must be on sys.path. /bot is the
+# parent of /bot/downloader_bot, so both the bot CMD below and the worker
+# compose service (which overrides this CMD) find their imports.
 WORKDIR /bot
 
 # Run the app with watchfiles to enable auto-reload on code base change
-#   The '--filter' is used to instruct watchfiles to only reload on python
-#   changes in these locations: "/bot/cogs", "/bot/storage", "/bot/bot.py"
+#   The '--filter' restricts reloads to .py changes; the single watch path is
+#   the package directory, so any new file dropped into /bot/downloader_bot/
+#   is picked up automatically.
 # See https://watchfiles.helpmanual.io/cli/#running-and-restarting-a-command
-CMD ["watchfiles", "--filter", "python", "python3 /bot/bot.py", "/bot/cogs", "/bot/storage", "/bot/db", "/bot/bot.py", "/bot/config.py", "/bot/queue_client.py"]
+CMD ["watchfiles", "--filter", "python", "python3 -m downloader_bot.bot", "/bot/downloader_bot"]
 
 STOPSIGNAL SIGTERM
 
@@ -90,15 +91,9 @@ RUN apt update \
   ca-certificates \
   bash 
 
-# We'll change or create the directory bot again, and copy any files we need for the bot to work
-# Copy over discord bot file and cogs
-COPY /bot.py /bot/bot.py
-COPY /config.py /bot/config.py
-COPY /queue_client.py /bot/queue_client.py
-COPY /cogs /bot/cogs
-COPY /storage /bot/storage
-COPY /worker /bot/worker
-COPY /db /bot/db
+# Ship the entire application package. New top-level files added under
+# downloader_bot/ are picked up automatically — no Dockerfile edit required.
+COPY /downloader_bot /bot/downloader_bot
 COPY /requirements.txt /bot/
 
 # Copy over our start shell file. This will be used to create environment variables for the token of the bot
@@ -121,9 +116,10 @@ RUN adduser --disabled-password --gecos "" discordbot \
 # Change into the user
 USER discordbot
 
-# Set working directory so the worker entrypoint (``arq worker.main.WorkerSettings``)
-# can resolve its imports when this same image is run as a worker (compose / docker run
-# override the CMD; the default below still launches the bot).
+# Set working directory to the parent of the downloader_bot package so its
+# imports resolve via sys.path when this same image is run as a worker
+# (``arq downloader_bot.worker.main.WorkerSettings``). compose / docker run
+# override the CMD; the default below still launches the bot.
 WORKDIR /bot
 
 # This is to add any executeables that is needed for any programs to run. Normally if you are running a web app w/ gunicorn, you'll need this step

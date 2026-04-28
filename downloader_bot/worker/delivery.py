@@ -13,7 +13,7 @@ from io import BytesIO
 import asyncpg
 import discord
 
-from db import guild_settings
+from downloader_bot.db import guild_settings
 
 
 logger = logging.getLogger("downloader_bot.worker.delivery")

@@ -1,6 +1,6 @@
 """ARQ worker entrypoint.
 
-Run with ``arq worker.main.WorkerSettings`` from the project root. The worker
+Run with ``arq downloader_bot.worker.main.WorkerSettings`` from the project root. The worker
 connects to Redis using the same ``REDIS_URL`` the bot uses to enqueue jobs.
 
 ``on_startup`` opens a single REST-only Discord client and a Postgres pool and
@@ -14,11 +14,11 @@ from typing import Any
 
 import discord
 
-from config import settings
-from db.pool import open_pool as open_db_pool
-from queue_client import redis_settings
-from worker.discord_rest import open_client
-from worker.jobs import download_channel_media
+from downloader_bot.config import settings
+from downloader_bot.db.pool import open_pool as open_db_pool
+from downloader_bot.queue_client import redis_settings
+from downloader_bot.worker.discord_rest import open_client
+from downloader_bot.worker.jobs import download_channel_media
 
 
 logger = logging.getLogger("downloader_bot.worker")

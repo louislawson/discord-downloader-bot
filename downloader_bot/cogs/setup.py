@@ -17,7 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context, errors
 
-from db import guild_settings
+from downloader_bot.db import guild_settings
 
 
 class NotGuildOwner(commands.CheckFailure):

@@ -12,9 +12,9 @@ from discord.ext.commands import Context, errors
 import discordhealthcheck
 from arq.connections import ArqRedis
 
-from config import settings
-from db.pool import init_schema, open_pool as open_db_pool
-from queue_client import open_pool
+from downloader_bot.config import settings
+from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
+from downloader_bot.queue_client import open_pool
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -106,10 +106,10 @@ class DiscordBot(commands.Bot):
     async def load_cogs(self) -> None:
         """Load all cog extensions from the /cogs directory."""
         for file in os.listdir(f"{os.path.realpath(os.path.dirname(__file__))}/cogs"):
-            if file.endswith(".py"):
+            if file.endswith(".py") and not file.startswith("_"):
                 extension = file[:-3]
                 try:
-                    await self.load_extension(f"cogs.{extension}")
+                    await self.load_extension(f"downloader_bot.cogs.{extension}")
                     self.logger.info("Loaded extension '%s'", extension)
                 except errors.ExtensionNotFound as e:
                     self.logger.error(

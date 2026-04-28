@@ -12,8 +12,8 @@ from azure.storage.blob import (
 )
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
-from config import settings
-from storage.exceptions import BlobUploadError, SasGenerationError
+from downloader_bot.config import settings
+from downloader_bot.storage.exceptions import BlobUploadError, SasGenerationError
 
 
 def _build_client() -> ContainerClient:

@@ -8,7 +8,7 @@ A Discord bot that bundles every allowed-MIME attachment in a channel into one i
 
 ## Common commands
 
-Dev — auto-reloads on changes to `bot.py`, `cogs/`, `storage/`, `db/`, `worker/`, `config.py`, `queue_client.py` via watchfiles:
+Dev — auto-reloads on any `.py` change under `downloader_bot/` via watchfiles:
 
 ```bash
 cp .env.example .env   # fill in TOKEN; for Azurite see README quickstart
@@ -33,70 +33,70 @@ There is **no test suite, no lint/format config, and no Makefile**. The only ver
 The same Docker image runs as two compose services with different `CMD`s:
 
 - **bot** — connects to the Discord gateway, exposes slash/prefix commands, opens an asyncpg pool to Postgres and an ARQ pool to Redis. Commands enqueue jobs and ack the user; they don't do work.
-- **worker** — `arq worker.main.WorkerSettings`. REST-only Discord client (no gateway), shared asyncpg pool, runs the four-phase pipeline below. Multiple workers can run in parallel; per-channel ordering isn't guaranteed (the bot uses unique `_job_id`s, not channel-keyed locks).
+- **worker** — `arq downloader_bot.worker.main.WorkerSettings`. REST-only Discord client (no gateway), shared asyncpg pool, runs the four-phase pipeline below. Multiple workers can run in parallel; per-channel ordering isn't guaranteed (the bot uses unique `_job_id`s, not channel-keyed locks).
 
 The split exists because zipping a busy channel routinely takes longer than Discord's 15-minute interaction-token window. Decoupling also lets independent channels run in parallel.
 
 ### Entry point
 
-`bot.py` defines `DiscordBot(commands.Bot)`. `setup_hook` opens the asyncpg pool, runs `init_schema(pool)` (idempotent `CREATE TABLE IF NOT EXISTS` from `db/schema.sql`), then calls `load_cogs()`, which scans `cogs/` and `load_extension()`s every `.py` file dynamically. The ARQ pool is opened after cogs load. Adding a cog = drop a file in `cogs/` with an `async def setup(bot)` — no registration list to update.
+`downloader_bot/bot.py` defines `DiscordBot(commands.Bot)`. `setup_hook` opens the asyncpg pool, runs `init_schema(pool)` (idempotent `CREATE TABLE IF NOT EXISTS` from `downloader_bot/db/schema.sql`), then calls `load_cogs()`, which scans `downloader_bot/cogs/` and `load_extension()`s every `.py` file dynamically (as `downloader_bot.cogs.<name>`). The ARQ pool is opened after cogs load. Adding a cog = drop a file in `downloader_bot/cogs/` with an `async def setup(bot)` — no registration list to update.
 
 ### Cogs
 
-- `cogs/download.py` — `@commands.hybrid_command` `/download`. Validates, builds a JSON-serialisable payload, calls `arq_pool.enqueue_job("download_channel_media", payload, _job_id=job_id)`, replies with a blurple "Download queued" ack. Two service-unavailable paths: `arq_pool is None` (Redis unreachable at startup) and an `enqueue_job` that raises mid-flight (Redis went away after startup) — both surface the same red embed.
-- `cogs/setup.py` — `@commands.hybrid_group` `/setup` with `mode | channel | clear | show` subcommands, server-owner-gated via a custom `_is_guild_owner` predicate that raises `NotGuildOwner(commands.CheckFailure)`. Cog-local `cog_command_error` handles `NotGuildOwner` and `NoPrivateMessage` so they don't leak to the global handler.
-- `cogs/owner.py` — owner-only `<PREFIX>sync global|guild` for slash-command registration. Run this after adding or changing a hybrid command before slash UI updates.
+- `downloader_bot/cogs/download.py` — `@commands.hybrid_command` `/download`. Validates, builds a JSON-serialisable payload, calls `arq_pool.enqueue_job("download_channel_media", payload, _job_id=job_id)`, replies with a blurple "Download queued" ack. Two service-unavailable paths: `arq_pool is None` (Redis unreachable at startup) and an `enqueue_job` that raises mid-flight (Redis went away after startup) — both surface the same red embed.
+- `downloader_bot/cogs/setup.py` — `@commands.hybrid_group` `/setup` with `mode | channel | clear | show` subcommands, server-owner-gated via a custom `_is_guild_owner` predicate that raises `NotGuildOwner(commands.CheckFailure)`. Cog-local `cog_command_error` handles `NotGuildOwner` and `NoPrivateMessage` so they don't leak to the global handler.
+- `downloader_bot/cogs/owner.py` — owner-only `<PREFIX>sync global|guild` for slash-command registration. Run this after adding or changing a hybrid command before slash UI updates.
 
-### Worker (`worker/`)
+### Worker (`downloader_bot/worker/`)
 
-- `worker/main.py` — defines `WorkerSettings` (the ARQ entrypoint discovered by import path) and `on_startup`/`on_shutdown` hooks. `on_startup` opens a REST-only Discord client and an asyncpg pool, stashing both on `ctx` (`ctx['discord_client']`, `ctx['db_pool']`).
-- `worker/jobs.py` — `download_channel_media(ctx, payload)` is the public ARQ function. It's a thin wrapper around `_run_download_channel_media` that catches any unhandled exception, calls `deliver()` with a generic "Download failed" embed, then re-raises so ARQ records the failure. **ARQ's `max_tries` only governs `Retry`/`RetryJob`-driven retries** — arbitrary `Exception`s go straight to a permanent `! ... failed` ([arq/worker.py:594-625](https://github.com/python-arq/arq/blob/v0.26.3/arq/worker.py)), so by the time the wrapper sees an exception, the job is over. `Retry`/`RetryJob` are re-raised untouched so explicit retry signaling still works if a future code path uses it. Anticipated errors (Forbidden, ContainerConfigError, BlobUploadError + fallback) are handled inside the body and produce their own targeted embeds. The four-phase pipeline lives here:
+- `downloader_bot/worker/main.py` — defines `WorkerSettings` (the ARQ entrypoint discovered by import path) and `on_startup`/`on_shutdown` hooks. `on_startup` opens a REST-only Discord client and an asyncpg pool, stashing both on `ctx` (`ctx['discord_client']`, `ctx['db_pool']`).
+- `downloader_bot/worker/jobs.py` — `download_channel_media(ctx, payload)` is the public ARQ function. It's a thin wrapper around `_run_download_channel_media` that catches any unhandled exception, calls `deliver()` with a generic "Download failed" embed, then re-raises so ARQ records the failure. **ARQ's `max_tries` only governs `Retry`/`RetryJob`-driven retries** — arbitrary `Exception`s go straight to a permanent `! ... failed` ([arq/worker.py:594-625](https://github.com/python-arq/arq/blob/v0.26.3/arq/worker.py)), so by the time the wrapper sees an exception, the job is over. `Retry`/`RetryJob` are re-raised untouched so explicit retry signaling still works if a future code path uses it. Anticipated errors (Forbidden, ContainerConfigError, BlobUploadError + fallback) are handled inside the body and produce their own targeted embeds. The four-phase pipeline lives here:
   1. **Collect** — `channel.history(limit=None)`, filter by `payload['allowed_media_types']`, stream each attachment into one in-memory `ZipFile` keyed `{message_id}_{filename}`. Per-attachment HTTP errors are logged and skipped.
   2. **Validate** — zero media → red error embed via `deliver`, return.
   3. **Upload** — `async with ContainerRepository()` → `create()` → `sas_url()`. In dev, rewrite the SAS host from `ST_INT_URL` to `ST_EXT_URL`.
   4. **Deliver** — green success embed via `deliver`.
-- `worker/delivery.py` — `deliver(...)` decides DM vs channel post per the guild's `delivery_mode` (Postgres-backed, see `db/`). Idempotent via a Redis `delivered:{job_id}` SET-NX claim with 24h TTL, so ARQ retries don't double-send. Decision tree: `only_me=True` → DM only (fail-closed on Forbidden). `mode=dm` → DM only, fail-closed. `mode=channel` with no channel set → fall back to DM, fail-closed. `mode=both` → DM first, channel on Forbidden; if no channel and DM blocked, drop with a warning.
-- `worker/discord_rest.py` — opens a REST-only `discord.Client` (no gateway, no intents) for the worker, since the worker only needs to fetch channels/users and send messages.
+- `downloader_bot/worker/delivery.py` — `deliver(...)` decides DM vs channel post per the guild's `delivery_mode` (Postgres-backed, see `downloader_bot/db/`). Idempotent via a Redis `delivered:{job_id}` SET-NX claim with 24h TTL, so ARQ retries don't double-send. Decision tree: `only_me=True` → DM only (fail-closed on Forbidden). `mode=dm` → DM only, fail-closed. `mode=channel` with no channel set → fall back to DM, fail-closed. `mode=both` → DM first, channel on Forbidden; if no channel and DM blocked, drop with a warning.
+- `downloader_bot/worker/discord_rest.py` — opens a REST-only `discord.Client` (no gateway, no intents) for the worker, since the worker only needs to fetch channels/users and send messages.
 
-### Fallback ladder (`worker/jobs.py`)
+### Fallback ladder (`downloader_bot/worker/jobs.py`)
 
 - `BlobUploadError` / `SasGenerationError` → if `zip_size <= guild_upload_limit`, deliver the zip as a Discord attachment with an orange "Azure unavailable" embed; otherwise deliver a hard-error embed.
 - `ContainerConfigError` is **non-recoverable** (deployment misconfig). Never falls back; always surfaces as a hard error.
 - Guild upload limit comes from `_guild_upload_limit()` (worker-local copy of the boost-tier table) — Tier 0/1: 8 MB, Tier 2: 50 MB, Tier 3: 100 MB, DM/unknown: 8 MB.
 - Guild upload limit needs a real `Guild` (REST `fetch_guild`) — `client.fetch_channel(...)`'s `.guild` is a placeholder `Object` in REST-only mode and lacks `premium_tier`.
 
-### Database (`db/`)
+### Database (`downloader_bot/db/`)
 
 Single-table Postgres schema bootstrapped via `CREATE TABLE IF NOT EXISTS` on bot startup — alembic deferred until there's more than one table to manage.
 
-- `db/schema.sql` — `guild_settings(guild_id BIGINT PK, delivery_mode TEXT CHECK IN ('dm','channel','both') DEFAULT 'dm', results_channel_id BIGINT, updated_at TIMESTAMPTZ DEFAULT now())`.
-- `db/pool.py` — `open_pool()` and `init_schema(pool)`. The bot calls both in `setup_hook`; the worker only calls `open_pool()` (the bot owns schema bootstrap).
-- `db/guild_settings.py` — read/write API (`get`, `set_mode`, `set_channel`, `clear_channel`). `get(pool, guild_id=None)` and `get` for an unconfigured guild both return `("dm", None)` — the safe default. UPSERTs use `ON CONFLICT (guild_id) DO UPDATE`.
+- `downloader_bot/db/schema.sql` — `guild_settings(guild_id BIGINT PK, delivery_mode TEXT CHECK IN ('dm','channel','both') DEFAULT 'dm', results_channel_id BIGINT, updated_at TIMESTAMPTZ DEFAULT now())`.
+- `downloader_bot/db/pool.py` — `open_pool()` and `init_schema(pool)`. The bot calls both in `setup_hook`; the worker only calls `open_pool()` (the bot owns schema bootstrap).
+- `downloader_bot/db/guild_settings.py` — read/write API (`get`, `set_mode`, `set_channel`, `clear_channel`). `get(pool, guild_id=None)` and `get` for an unconfigured guild both return `("dm", None)` — the safe default. UPSERTs use `ON CONFLICT (guild_id) DO UPDATE`.
 
 ### Error handling pattern
 
-Cogs raise **typed exceptions**; the global `on_command_error` handler in `bot.py` translates them into user-facing embeds. Don't write per-cog error embeds for storage failures — raise from `storage/exceptions.py` (`ContainerConfigError`, `BlobUploadError`, `SasGenerationError`) and let the central handler format the message. discord.py's built-in errors (`CommandOnCooldown`, `MissingPermissions`, `BadArgument`, etc.) are also handled centrally. Cog-local `cog_command_error` is fine for cog-specific custom checks (see `cogs/setup.py`'s `NotGuildOwner` handling).
+Cogs raise **typed exceptions**; the global `on_command_error` handler in `downloader_bot/bot.py` translates them into user-facing embeds. Don't write per-cog error embeds for storage failures — raise from `downloader_bot/storage/exceptions.py` (`ContainerConfigError`, `BlobUploadError`, `SasGenerationError`) and let the central handler format the message. discord.py's built-in errors (`CommandOnCooldown`, `MissingPermissions`, `BadArgument`, etc.) are also handled centrally. Cog-local `cog_command_error` is fine for cog-specific custom checks (see `downloader_bot/cogs/setup.py`'s `NotGuildOwner` handling).
 
-### Storage layer (`storage/container.py`)
+### Storage layer (`downloader_bot/storage/container.py`)
 
 - `ContainerRepository` is an async context manager wrapping `azure.storage.blob.aio.ContainerClient`. Constructor takes an optional `client=` for dependency-injected mocks.
 - `_build_client()` reads `settings.ST_CONN_STR` and `settings.ST_CONTAINER` directly.
 - `sas_url()` requires the connection string to carry an `AccountKey` — it inspects `credential.account_key`. SAS-token-only or MSI credentials raise `SasGenerationError` at first call, not at startup.
 - All `AzureError`s are caught and re-raised as `BlobUploadError` / `SasGenerationError` so callers don't import the Azure SDK to handle failures.
 
-### Config (`config.py`)
+### Config (`downloader_bot/config.py`)
 
-pydantic-settings `Settings` model loaded from `.env`. Import the singleton: `from config import settings`. Never re-read env vars with `os.getenv` — go through `settings`. `ALLOWED_MEDIA_TYPES` is parsed as JSON automatically by pydantic. New post-phase-2/3 keys: `REDIS_URL` (ARQ broker), `POSTGRES_DSN` (asyncpg). The README env-var table is the canonical reference.
+pydantic-settings `Settings` model loaded from `.env`. Import the singleton: `from downloader_bot.config import settings`. Never re-read env vars with `os.getenv` — go through `settings`. `ALLOWED_MEDIA_TYPES` is parsed as JSON automatically by pydantic. New post-phase-2/3 keys: `REDIS_URL` (ARQ broker), `POSTGRES_DSN` (asyncpg). The README env-var table is the canonical reference.
 
 ## Conventions worth knowing
 
-- **Adding a top-level Python file** (sibling of `bot.py`): update **both** the prod `COPY` block in `Dockerfile` **and** the watchfiles arg list in the dev `CMD` (and the worker `command:` in `docker-compose.yml`, which has its own watchfiles list). Recent commit `915d0bb` fixed a missed `COPY` for `config.py` — this coupling is easy to forget and only fails at container runtime.
-- **Adding a top-level Python directory** (sibling of `cogs/`): same as above — update prod `COPY` plus both watchfiles lists. The `db/` directory was added in phase 3 and needed all three.
+- **Adding a top-level Python file or directory**: drop it under `downloader_bot/`. The prod `Dockerfile` ships the entire package via `COPY /downloader_bot /bot/downloader_bot`; the dev image's `CMD` and the worker compose `command:` both watch the same directory. No Docker / compose changes are required for new files.
+- **Imports are absolute and package-qualified.** Use `from downloader_bot.config import settings`, `from downloader_bot.db.pool import open_pool`, etc. The bot is run as `python -m downloader_bot.bot` and the worker as `arq downloader_bot.worker.main.WorkerSettings`, both with `WORKDIR=/bot` so the package resolves on `sys.path`.
+- **Every directory under `downloader_bot/` is a regular package** with an `__init__.py` (usually empty). Don't add namespace-package tricks — keep these as plain packages so static analysers and IDE tooling resolve them cleanly.
 - **Job payloads must be JSON-serialisable.** ARQ pickles by default but we keep payloads JSON-friendly (ISO timestamps as strings, lists not sets) so they're inspectable in Redis and survive worker version skew.
-- **Schema changes** today mean editing `db/schema.sql` and shipping; it re-runs idempotently on bot startup. If a migration ever needs to drop a column or backfill, that's the point at which alembic earns its keep — don't add it preemptively.
+- **Schema changes** today mean editing `downloader_bot/db/schema.sql` and shipping; it re-runs idempotently on bot startup. If a migration ever needs to drop a column or backfill, that's the point at which alembic earns its keep — don't add it preemptively.
 - **All I/O is async.** Don't introduce synchronous Azure SDK or `requests` calls; use `azure.storage.blob.aio` and `aiohttp`.
-- **Keep the zip in-memory.** The `BytesIO` + streaming-into-`ZipFile` pattern in `worker/jobs.py` is deliberate — there is no scratch directory, and adding one would regress an earlier optimisation.
-- **No `__init__.py`** in `cogs/` or `storage/`. `worker/` and `db/` are also flat-module loadable via `worker.main`, `db.pool`, etc. — don't add packaging metadata that would change that.
+- **Keep the zip in-memory.** The `BytesIO` + streaming-into-`ZipFile` pattern in `downloader_bot/worker/jobs.py` is deliberate — there is no scratch directory, and adding one would regress an earlier optimisation.
 - **Hybrid commands** (`@commands.hybrid_command`/`@commands.hybrid_group`) need an owner to run `<PREFIX>sync global` (or `guild` for instant local testing) before the slash UI reflects changes.
 - **`only_me` flag on `/download`** propagates from the cog into the job payload and is honoured by `deliver()` (forces DM-only, fail-closed). The cog's initial `context.defer(ephemeral=only_me)` and ack `context.send(..., ephemeral=only_me)` must also respect it.
 - **Idempotent delivery** is enforced by a Redis SET-NX claim in `deliver()` keyed `delivered:{job_id}` with 24h TTL. Anything called downstream of that claim is "at most once per job_id". If you add a new delivery path, route it through `deliver()` rather than calling `user.send`/`channel.send` directly.

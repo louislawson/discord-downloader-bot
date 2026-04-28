@@ -34,16 +34,14 @@ services:
       - .env
     # Override the dev image's bot CMD with the arq worker entrypoint, wrapped in
     # watchfiles so worker code changes hot-reload the same way bot.py does.
+    # Single watch path = the package directory; new files are picked up
+    # automatically.
     command:
       - watchfiles
       - --filter
       - python
-      - arq worker.main.WorkerSettings
-      - /bot/worker
-      - /bot/storage
-      - /bot/db
-      - /bot/config.py
-      - /bot/queue_client.py
+      - arq downloader_bot.worker.main.WorkerSettings
+      - /bot/downloader_bot
     depends_on:
       redis:
         condition: service_healthy

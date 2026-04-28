@@ -3,7 +3,7 @@
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 
-from config import settings
+from downloader_bot.config import settings
 
 
 def redis_settings() -> RedisSettings:

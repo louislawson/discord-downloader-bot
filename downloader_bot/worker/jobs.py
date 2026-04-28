@@ -13,14 +13,14 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import discord
 from arq.worker import Retry, RetryJob
 
-from config import settings
-from storage.container import ContainerRepository
-from storage.exceptions import (
+from downloader_bot.config import settings
+from downloader_bot.storage.container import ContainerRepository
+from downloader_bot.storage.exceptions import (
     BlobUploadError,
     ContainerConfigError,
     SasGenerationError,
 )
-from worker.delivery import DeliveryPayload, deliver
+from downloader_bot.worker.delivery import DeliveryPayload, deliver
 
 
 logger = logging.getLogger("downloader_bot.worker.jobs")

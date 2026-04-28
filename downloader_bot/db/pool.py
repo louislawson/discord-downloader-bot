@@ -4,7 +4,7 @@ from pathlib import Path
 
 import asyncpg
 
-from config import settings
+from downloader_bot.config import settings
 
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
