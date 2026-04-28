@@ -95,9 +95,28 @@ class Download(commands.Cog, name="download"):
             "allowed_media_types": list(settings.ALLOWED_MEDIA_TYPES),
         }
 
-        await self.bot.arq_pool.enqueue_job(
-            "download_channel_media", payload, _job_id=job_id,
-        )
+        try:
+            await self.bot.arq_pool.enqueue_job(
+                "download_channel_media", payload, _job_id=job_id,
+            )
+        except Exception as e:
+            # Pool was alive at startup but Redis went away mid-flight (broker
+            # down, network blip, auth rotated). Fail closed with the same
+            # service-unavailable embed the ``arq_pool is None`` branch uses
+            # so the requester gets a consistent message.
+            self.bot.logger.exception(
+                "Failed to enqueue download job %s: %s", job_id, e,
+            )
+            await context.send(
+                embed=_error_embed(
+                    "Service unavailable",
+                    "The download queue is not currently available. "
+                    "Please try again in a moment.",
+                ),
+                ephemeral=only_me,
+            )
+            return
+
         self.bot.logger.info(
             "Enqueued download job %s for channel %s (requester=%s, only_me=%s)",
             job_id, context.channel.id, context.author.id, only_me,

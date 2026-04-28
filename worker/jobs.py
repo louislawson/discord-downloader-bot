@@ -11,6 +11,7 @@ from io import BytesIO
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import discord
+from arq.worker import Retry, RetryJob
 
 from config import settings
 from storage.container import ContainerRepository
@@ -109,7 +110,63 @@ def _error_embed(title: str, description: str) -> discord.Embed:
     )
 
 
+def _unhandled_failure_embed() -> discord.Embed:
+    """Generic last-resort embed used when the job dies on an unhandled error."""
+    return discord.Embed(
+        title="Download failed",
+        description=(
+            "The download job failed unexpectedly. Please try again later, "
+            "or contact an administrator if this keeps happening."
+        ),
+        colour=discord.Color.red(),
+        timestamp=datetime.now(),
+    )
+
+
 async def download_channel_media(ctx: dict, payload: dict) -> dict:
+    """
+    Public ARQ entrypoint. Delegates to ``_run_download_channel_media`` and,
+    on any unhandled-exception path, delivers a generic failure embed
+    before re-raising so the requester isn't left waiting on a job that
+    will never deliver.
+
+    ARQ's ``max_tries`` only governs ``Retry``/``RetryJob``-driven retries —
+    arbitrary exceptions go straight to a permanent ``! ... failed``, so by
+    the time we land in the ``except Exception`` branch the job is over and
+    we always need to surface something to the user. ``Retry``/``RetryJob``
+    are re-raised untouched so ARQ's retry signaling still works if a
+    future code path uses it.
+
+    Anticipated errors (Forbidden history walks, missing Azure config,
+    upload failures with attachment fallback, etc.) are handled inside the
+    body and produce their own targeted embeds — this wrapper only fires
+    for everything else (network blips, transient Discord 5xx, unexpected
+    SDK errors).
+    """
+    job_id: str = ctx["job_id"]
+    try:
+        return await _run_download_channel_media(ctx, payload)
+    except (Retry, RetryJob):
+        raise
+    except Exception:
+        logger.exception("Job %s: unhandled exception, delivering failure embed", job_id)
+        try:
+            await deliver(
+                ctx["discord_client"], ctx["redis"], ctx["db_pool"],
+                job_id,
+                payload["requester_id"],
+                payload.get("guild_id"),
+                payload.get("only_me", False),
+                DeliveryPayload(embed=_unhandled_failure_embed()),
+            )
+        except Exception:
+            logger.exception(
+                "Job %s: failure-notification delivery itself failed", job_id,
+            )
+        raise
+
+
+async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     """
     Bundle a channel's allowed-MIME attachments into a zip, upload to Azure,
     and deliver the SAS link (or fallback attachment) via DM/channel.
@@ -265,7 +322,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
         if zip_size <= upload_limit:
             try:
                 await deliver(
-                    discord_client, redis_pool, job_id,
+                    discord_client, redis_pool, db_pool, job_id,
                     requester_id, guild_id, only_me,
                     DeliveryPayload(
                         embed=_attachment_fallback_embed(
@@ -279,7 +336,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
                 zip_buffer.close()
         else:
             await deliver(
-                discord_client, redis_pool, job_id,
+                discord_client, redis_pool, db_pool, job_id,
                 requester_id, guild_id, only_me,
                 DeliveryPayload(embed=_error_embed(
                     "Upload failed",

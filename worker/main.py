@@ -91,4 +91,8 @@ class WorkerSettings:
     on_shutdown = on_shutdown
     max_jobs = 3
     job_timeout = 1800  # 30 minutes — generous for big-channel zips
+    # ARQ only honours ``max_tries`` for ``Retry``/``RetryJob``-driven
+    # retries. Arbitrary unhandled exceptions fail the job immediately
+    # regardless of this value — see ``download_channel_media``'s wrapper
+    # for how that's surfaced to the user.
     max_tries = 2
