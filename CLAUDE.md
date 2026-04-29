@@ -24,7 +24,18 @@ docker run -d --name downloader-bot --env-file .env.prod downloader-bot:<VERSION
 
 ARM64 (e.g. Raspberry Pi): `docker build --platform linux/arm64/v8 -t downloader-bot:<VERSION>-arm64-v8 .`
 
-There is **no test suite, no lint/format config, and no Makefile**. The only verification path today is running the dev compose stack and exercising `/download` manually. Don't search for `pytest`, `ruff`, or `pre-commit` — none are configured.
+Tests / lint / format are wired through a `Makefile` (pytest 8.4.2, ruff 0.14.4, pre-commit 4.4.0; configured in `pyproject.toml` and `.pre-commit-config.yaml`):
+
+```bash
+make install-dev    # installs requirements-dev.txt + runs `pre-commit install`
+make test           # python -m pytest
+make test-cov       # pytest with coverage; HTML report at htmlcov/index.html
+make lint           # ruff check (no edits)
+make format         # ruff format + ruff check --fix in place
+make check          # lint + format-check + test — the pre-push gate
+```
+
+Tests are unit-only with mocks for Discord, Azure, asyncpg, and ARQ-Redis — **no compose stack is required to run them**. There is no CI yet, so `make check` is the only gate before merging.
 
 ## Architecture
 
@@ -46,6 +57,7 @@ The split exists because zipping a busy channel routinely takes longer than Disc
 - `downloader_bot/cogs/download.py` — `@commands.hybrid_command` `/download`. Validates, builds a JSON-serialisable payload, calls `arq_pool.enqueue_job("download_channel_media", payload, _job_id=job_id)`, replies with a blurple "Download queued" ack. Two service-unavailable paths: `arq_pool is None` (Redis unreachable at startup) and an `enqueue_job` that raises mid-flight (Redis went away after startup) — both surface the same red embed.
 - `downloader_bot/cogs/setup.py` — `@commands.hybrid_group` `/setup` with `mode | channel | clear | show` subcommands, server-owner-gated via a custom `_is_guild_owner` predicate that raises `NotGuildOwner(commands.CheckFailure)`. Cog-local `cog_command_error` handles `NotGuildOwner` and `NoPrivateMessage` so they don't leak to the global handler.
 - `downloader_bot/cogs/owner.py` — owner-only `<PREFIX>sync global|guild` for slash-command registration. Run this after adding or changing a hybrid command before slash UI updates.
+- `downloader_bot/cogs/general.py` — `@commands.hybrid_command` `/invite`. Sends the bot's invite link via DM, falls back to an ephemeral channel reply if DMs are blocked.
 
 ### Worker (`downloader_bot/worker/`)
 
@@ -100,3 +112,4 @@ pydantic-settings `Settings` model loaded from `.env`. Import the singleton: `fr
 - **Hybrid commands** (`@commands.hybrid_command`/`@commands.hybrid_group`) need an owner to run `<PREFIX>sync global` (or `guild` for instant local testing) before the slash UI reflects changes.
 - **`only_me` flag on `/download`** propagates from the cog into the job payload and is honoured by `deliver()` (forces DM-only, fail-closed). The cog's initial `context.defer(ephemeral=only_me)` and ack `context.send(..., ephemeral=only_me)` must also respect it.
 - **Idempotent delivery** is enforced by a Redis SET-NX claim in `deliver()` keyed `delivered:{job_id}` with 24h TTL. Anything called downstream of that claim is "at most once per job_id". If you add a new delivery path, route it through `deliver()` rather than calling `user.send`/`channel.send` directly.
+- **Tests mirror the package layout** under `tests/` — a change to `downloader_bot/worker/jobs.py` belongs in `tests/worker/test_jobs.py`. Reuse fixtures from the cross-cutting `tests/conftest.py` and per-layer `conftest.py`s rather than re-mocking from scratch. `pyproject.toml` sets `asyncio_mode = "auto"`, so `async def test_*` works without `@pytest.mark.asyncio`. The cross-cutting `tests/conftest.py` sets required env vars (`TOKEN`, `ST_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because `downloader_bot/config.py` constructs the `settings` singleton at import — per-test `monkeypatch.setenv` is too late.
