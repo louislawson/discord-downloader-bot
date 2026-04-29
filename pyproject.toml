@@ -1,0 +1,68 @@
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = [".venv", "__pycache__", "scripts"]
+
+[tool.ruff.lint]
+select = [
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # isort
+  "UP",    # pyupgrade
+  "N",     # pep8-naming
+  "B",     # flake8-bugbear
+  "C4",    # flake8-comprehensions
+  "SIM",   # flake8-simplify
+  "ASYNC", # async-specific footguns
+  "RUF",   # ruff-specific rules
+]
+ignore = [
+  "B008",   # discord.py decorators legitimately use call-in-default
+  "E501",   # line length deferred to ruff format
+  "N818",   # NotGuildOwner / Retry / RetryJob aren't *Error
+  "SIM117", # nested-with reads better in ContainerRepository pattern
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101"]
+"downloader_bot/bot.py" = ["N802"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["downloader_bot"]
+combine-as-imports = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--import-mode=importlib",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+  "error",
+  "ignore::DeprecationWarning:discord.*",
+  "ignore::DeprecationWarning:audioop",
+  "ignore::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.coverage.run]
+source = ["downloader_bot"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]
