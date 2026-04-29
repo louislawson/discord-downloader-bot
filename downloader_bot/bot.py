@@ -4,13 +4,14 @@ import logging
 import os
 import platform
 import random
+from typing import ClassVar
 
 import asyncpg
 import discord
-from discord.ext import commands, tasks
-from discord.ext.commands import Context, errors
 import discordhealthcheck
 from arq.connections import ArqRedis
+from discord.ext import commands, tasks
+from discord.ext.commands import Context, errors
 
 from downloader_bot.config import settings
 from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
@@ -47,7 +48,7 @@ class LoggingFormatter(logging.Formatter):
     reset = "\x1b[0m"
     bold = "\x1b[1m"
 
-    COLORS = {
+    COLORS: ClassVar[dict[int, str]] = {
         logging.DEBUG: gray + bold,
         logging.INFO: blue + bold,
         logging.WARNING: yellow + bold,
@@ -112,13 +113,9 @@ class DiscordBot(commands.Bot):
                     await self.load_extension(f"downloader_bot.cogs.{extension}")
                     self.logger.info("Loaded extension '%s'", extension)
                 except errors.ExtensionNotFound as e:
-                    self.logger.error(
-                        "Couldn't find extension '%s': %s", extension, e
-                    )
+                    self.logger.error("Couldn't find extension '%s': %s", extension, e)
                 except errors.ExtensionAlreadyLoaded as e:
-                    self.logger.error(
-                        "Extension already loaded '%s': %s", extension, e
-                    )
+                    self.logger.error("Extension already loaded '%s': %s", extension, e)
                 except errors.NoEntryPointError as e:
                     self.logger.error(
                         "Extension has no setup() entry point '%s': %s", extension, e
@@ -331,5 +328,11 @@ class DiscordBot(commands.Bot):
             await context.send(embed=embed)
 
 
-bot = DiscordBot()
-bot.run(settings.TOKEN)
+def main() -> None:
+    """Construct the bot and hand control to discord.py's gateway loop."""
+    bot = DiscordBot()
+    bot.run(settings.TOKEN)
+
+
+if __name__ == "__main__":
+    main()

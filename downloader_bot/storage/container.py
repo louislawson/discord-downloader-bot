@@ -1,7 +1,6 @@
 """Azure Container Blob service module."""
 
-from datetime import datetime, timedelta, timezone
-from typing import Dict
+from datetime import UTC, datetime, timedelta
 
 from azure.core.exceptions import AzureError
 from azure.storage.blob import (
@@ -74,10 +73,10 @@ class ContainerRepository:
         data: bytes | str,
         length: int | None = None,
         blob_type: BlobType = BlobType.BLOCKBLOB,
-        metadata: Dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
         content_settings: ContentSettings | None = None,
         overwrite: bool = False,
-        tags: Dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
     ) -> BlobClient:
         """
         Upload a new blob to the container.
@@ -149,8 +148,8 @@ class ContainerRepository:
                 "configured with account key auth."
             )
 
-        valid_from = valid_from or datetime.now(timezone.utc)
-        valid_to = valid_to or datetime.now(timezone.utc) + timedelta(hours=1)
+        valid_from = valid_from or datetime.now(UTC)
+        valid_to = valid_to or datetime.now(UTC) + timedelta(hours=1)
 
         try:
             sas_token = generate_blob_sas(

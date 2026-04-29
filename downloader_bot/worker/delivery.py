@@ -15,7 +15,6 @@ import discord
 
 from downloader_bot.db import guild_settings
 
-
 logger = logging.getLogger("downloader_bot.worker.delivery")
 
 # How long the per-job "delivered" marker lives in Redis. Long enough to cover
@@ -105,7 +104,9 @@ async def deliver(
 
     if only_me:
         await _try_dm(
-            discord_client, requester_id, payload,
+            discord_client,
+            requester_id,
+            payload,
             fail_closed_reason="only_me=True",
         )
         return
@@ -114,7 +115,10 @@ async def deliver(
 
     if mode == "dm":
         await _try_dm(
-            discord_client, requester_id, payload, fail_closed_reason="mode=dm",
+            discord_client,
+            requester_id,
+            payload,
+            fail_closed_reason="mode=dm",
         )
         return
 
@@ -123,10 +127,13 @@ async def deliver(
             logger.warning(
                 "Job %s: mode=channel but no results channel configured for "
                 "guild %s — falling back to DM",
-                job_id, guild_id,
+                job_id,
+                guild_id,
             )
             await _try_dm(
-                discord_client, requester_id, payload,
+                discord_client,
+                requester_id,
+                payload,
                 fail_closed_reason="mode=channel, no channel configured",
             )
             return
@@ -135,14 +142,18 @@ async def deliver(
 
     # mode == "both"
     if await _try_dm(
-        discord_client, requester_id, payload, fail_closed_reason=None,
+        discord_client,
+        requester_id,
+        payload,
+        fail_closed_reason=None,
     ):
         return
     if channel_id is None:
         logger.warning(
             "Job %s: DM blocked, mode=both, but no fallback channel configured "
             "for guild %s — dropping delivery",
-            job_id, guild_id,
+            job_id,
+            guild_id,
         )
         return
     await _post_to_channel(discord_client, channel_id, requester_id, payload)
@@ -171,11 +182,13 @@ async def _try_dm(
         if fail_closed_reason is not None:
             logger.warning(
                 "DM to user %s blocked (%s) — failing closed",
-                user_id, fail_closed_reason,
+                user_id,
+                fail_closed_reason,
             )
         else:
             logger.info(
-                "DM to user %s blocked — falling back to channel", user_id,
+                "DM to user %s blocked — falling back to channel",
+                user_id,
             )
         return False
 

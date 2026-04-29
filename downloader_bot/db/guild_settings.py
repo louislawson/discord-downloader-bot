@@ -8,12 +8,12 @@ from typing import Literal
 
 import asyncpg
 
-
 DeliveryMode = Literal["dm", "channel", "both"]
 
 
 async def get(
-    pool: asyncpg.Pool, guild_id: int | None,
+    pool: asyncpg.Pool,
+    guild_id: int | None,
 ) -> tuple[DeliveryMode, int | None]:
     """
     Read delivery settings for ``guild_id``.
@@ -34,7 +34,9 @@ async def get(
 
 
 async def set_mode(
-    pool: asyncpg.Pool, guild_id: int, mode: DeliveryMode,
+    pool: asyncpg.Pool,
+    guild_id: int,
+    mode: DeliveryMode,
 ) -> None:
     """Upsert ``delivery_mode`` for ``guild_id``; preserves any existing channel."""
     await pool.execute(
@@ -42,12 +44,15 @@ async def set_mode(
         "VALUES ($1, $2) "
         "ON CONFLICT (guild_id) DO UPDATE "
         "SET delivery_mode = EXCLUDED.delivery_mode, updated_at = now()",
-        guild_id, mode,
+        guild_id,
+        mode,
     )
 
 
 async def set_channel(
-    pool: asyncpg.Pool, guild_id: int, channel_id: int,
+    pool: asyncpg.Pool,
+    guild_id: int,
+    channel_id: int,
 ) -> None:
     """Upsert ``results_channel_id`` for ``guild_id``; mode defaults to 'dm' on first insert."""
     await pool.execute(
@@ -55,7 +60,8 @@ async def set_channel(
         "VALUES ($1, $2) "
         "ON CONFLICT (guild_id) DO UPDATE "
         "SET results_channel_id = EXCLUDED.results_channel_id, updated_at = now()",
-        guild_id, channel_id,
+        guild_id,
+        channel_id,
     )
 
 

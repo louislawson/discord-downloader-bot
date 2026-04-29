@@ -26,12 +26,14 @@ class NotGuildOwner(commands.CheckFailure):
 
 def _is_guild_owner():
     """Check that succeeds only for the guild owner. Raises in DMs too."""
+
     async def predicate(context: Context) -> bool:
         if context.guild is None:
             raise commands.NoPrivateMessage()
         if context.author.id != context.guild.owner_id:
             raise NotGuildOwner("Only the server owner can configure this bot.")
         return True
+
     return commands.check(predicate)
 
 
@@ -116,7 +118,9 @@ class Setup(commands.Cog, name="setup"):
         mode="dm = private DM | channel = post in channel | both = DM with channel fallback",
     )
     async def setup_mode(
-        self, context: Context, mode: Literal["dm", "channel", "both"],
+        self,
+        context: Context,
+        mode: Literal["dm", "channel", "both"],
     ) -> None:
         """Update the delivery mode for this guild."""
         if not await self._ensure_db(context):
@@ -133,7 +137,9 @@ class Setup(commands.Cog, name="setup"):
     )
     @app_commands.describe(channel="The channel where results should be posted.")
     async def setup_channel(
-        self, context: Context, channel: discord.TextChannel,
+        self,
+        context: Context,
+        channel: discord.TextChannel,
     ) -> None:
         """Set the results channel for this guild."""
         if not await self._ensure_db(context):
@@ -148,7 +154,9 @@ class Setup(commands.Cog, name="setup"):
             )
             return
         await guild_settings.set_channel(
-            self.bot.db_pool, context.guild.id, channel.id,
+            self.bot.db_pool,
+            context.guild.id,
+            channel.id,
         )
         await context.send(
             embed=_ok_embed(f"Results channel set to {channel.mention}."),
@@ -178,7 +186,8 @@ class Setup(commands.Cog, name="setup"):
         if not await self._ensure_db(context):
             return
         mode, channel_id = await guild_settings.get(
-            self.bot.db_pool, context.guild.id,
+            self.bot.db_pool,
+            context.guild.id,
         )
         channel_str = f"<#{channel_id}>" if channel_id else "_not set_"
         await context.send(
@@ -190,7 +199,9 @@ class Setup(commands.Cog, name="setup"):
         )
 
     async def cog_command_error(
-        self, context: Context, error: errors.CommandError,
+        self,
+        context: Context,
+        error: errors.CommandError,
     ) -> None:
         """
         Handle setup-specific errors before the global handler sees them.

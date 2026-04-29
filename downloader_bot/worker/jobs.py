@@ -8,7 +8,7 @@ payload dict.
 import logging
 from datetime import datetime
 from io import BytesIO
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import discord
 from arq.worker import Retry, RetryJob
@@ -21,7 +21,6 @@ from downloader_bot.storage.exceptions import (
     SasGenerationError,
 )
 from downloader_bot.worker.delivery import DeliveryPayload, deliver
-
 
 logger = logging.getLogger("downloader_bot.worker.jobs")
 
@@ -44,7 +43,8 @@ def _guild_upload_limit(guild: discord.Guild | None) -> int:
 
 
 async def _resolve_guild(
-    client: discord.Client, guild_id: int | None,
+    client: discord.Client,
+    guild_id: int | None,
 ) -> discord.Guild | None:
     """
     Fetch a real ``Guild`` over REST so ``premium_tier`` is populated.
@@ -66,7 +66,10 @@ async def _resolve_guild(
 
 
 def _success_embed(
-    sas_url: str, image_count: int, video_count: int, requester_tag: str,
+    sas_url: str,
+    image_count: int,
+    video_count: int,
+    requester_tag: str,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="Channel Media Download",
@@ -82,7 +85,9 @@ def _success_embed(
 
 
 def _attachment_fallback_embed(
-    image_count: int, video_count: int, requester_tag: str,
+    image_count: int,
+    video_count: int,
+    requester_tag: str,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="Channel Media Download (direct attachment)",
@@ -149,10 +154,14 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     except (Retry, RetryJob):
         raise
     except Exception:
-        logger.exception("Job %s: unhandled exception, delivering failure embed", job_id)
+        logger.exception(
+            "Job %s: unhandled exception, delivering failure embed", job_id
+        )
         try:
             await deliver(
-                ctx["discord_client"], ctx["redis"], ctx["db_pool"],
+                ctx["discord_client"],
+                ctx["redis"],
+                ctx["db_pool"],
                 job_id,
                 payload["requester_id"],
                 payload.get("guild_id"),
@@ -161,7 +170,8 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
             )
         except Exception:
             logger.exception(
-                "Job %s: failure-notification delivery itself failed", job_id,
+                "Job %s: failure-notification delivery itself failed",
+                job_id,
             )
         raise
 
@@ -196,7 +206,11 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
 
     logger.info(
         "Job %s started: channel=%s guild=%s requester=%s only_me=%s",
-        job_id, channel_id, guild_id, requester_id, only_me,
+        job_id,
+        channel_id,
+        guild_id,
+        requester_id,
+        only_me,
     )
 
     channel = await discord_client.fetch_channel(channel_id)
@@ -224,7 +238,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     except discord.HTTPException as e:
                         logger.warning(
                             "Skipped attachment '%s' (msg %s): %s",
-                            attachment.filename, message.id, e,
+                            attachment.filename,
+                            message.id,
+                            e,
                         )
                         att_buffer.close()
                         continue
@@ -237,30 +253,47 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     except discord.Forbidden:
         logger.warning(
             "Job %s: missing permission to read history of channel %s",
-            job_id, channel_id,
+            job_id,
+            channel_id,
         )
         await deliver(
-            discord_client, redis_pool, db_pool, job_id,
-            requester_id, guild_id, only_me,
-            DeliveryPayload(embed=_error_embed(
-                "Missing permissions",
-                "I don't have permission to read the history of that channel.",
-            )),
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(
+                embed=_error_embed(
+                    "Missing permissions",
+                    "I don't have permission to read the history of that channel.",
+                )
+            ),
         )
         zip_buffer.close()
         return {"ok": False, "reason": "forbidden"}
     except discord.HTTPException as e:
         logger.exception(
-            "Job %s: discord error during history walk: %s", job_id, e,
+            "Job %s: discord error during history walk: %s",
+            job_id,
+            e,
         )
         await deliver(
-            discord_client, redis_pool, db_pool, job_id,
-            requester_id, guild_id, only_me,
-            DeliveryPayload(embed=_error_embed(
-                "Discord error",
-                "An unexpected Discord error occurred while reading the "
-                "channel's history. Please try again later.",
-            )),
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(
+                embed=_error_embed(
+                    "Discord error",
+                    "An unexpected Discord error occurred while reading the "
+                    "channel's history. Please try again later.",
+                )
+            ),
         )
         zip_buffer.close()
         return {"ok": False, "reason": "discord_http"}
@@ -268,15 +301,24 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     # --- Phase B: nothing to zip --------------------------------------------
     if image_count == 0 and video_count == 0:
         logger.info(
-            "Job %s: no allowed media found in channel %s", job_id, channel_id,
+            "Job %s: no allowed media found in channel %s",
+            job_id,
+            channel_id,
         )
         await deliver(
-            discord_client, redis_pool, db_pool, job_id,
-            requester_id, guild_id, only_me,
-            DeliveryPayload(embed=_error_embed(
-                "No media found",
-                "No allowed media types were found in that channel.",
-            )),
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(
+                embed=_error_embed(
+                    "No media found",
+                    "No allowed media types were found in that channel.",
+                )
+            ),
         )
         zip_buffer.close()
         return {"ok": False, "reason": "empty"}
@@ -292,10 +334,13 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     try:
         async with ContainerRepository() as container:
             blob_client = await container.create(
-                name=zip_filename, data=zip_buffer, overwrite=True,
+                name=zip_filename,
+                data=zip_buffer,
+                overwrite=True,
             )
             sas_url = await container.sas_url(
-                blob_name=blob_client.blob_name, blob_url=blob_client.url,
+                blob_name=blob_client.blob_name,
+                blob_url=blob_client.url,
             )
             if settings.ENVIRONMENT == "dev":
                 sas_url = sas_url.replace(settings.ST_INT_URL, settings.ST_EXT_URL)
@@ -303,13 +348,20 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     except ContainerConfigError:
         logger.exception("Job %s: storage misconfigured", job_id)
         await deliver(
-            discord_client, redis_pool, db_pool, job_id,
-            requester_id, guild_id, only_me,
-            DeliveryPayload(embed=_error_embed(
-                "Storage misconfigured",
-                "The bot's storage backend is not configured correctly. "
-                "Please contact an administrator.",
-            )),
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(
+                embed=_error_embed(
+                    "Storage misconfigured",
+                    "The bot's storage backend is not configured correctly. "
+                    "Please contact an administrator.",
+                )
+            ),
         )
         zip_buffer.close()
         return {"ok": False, "reason": "config"}
@@ -317,16 +369,24 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     except (BlobUploadError, SasGenerationError) as e:
         logger.exception(
             "Job %s: Azure storage failed (%s) — attempting attachment fallback",
-            job_id, type(e).__name__,
+            job_id,
+            type(e).__name__,
         )
         if zip_size <= upload_limit:
             try:
                 await deliver(
-                    discord_client, redis_pool, db_pool, job_id,
-                    requester_id, guild_id, only_me,
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
                     DeliveryPayload(
                         embed=_attachment_fallback_embed(
-                            image_count, video_count, requester_tag,
+                            image_count,
+                            video_count,
+                            requester_tag,
                         ),
                         attachment=(zip_buffer, zip_filename),
                     ),
@@ -336,15 +396,22 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                 zip_buffer.close()
         else:
             await deliver(
-                discord_client, redis_pool, db_pool, job_id,
-                requester_id, guild_id, only_me,
-                DeliveryPayload(embed=_error_embed(
-                    "Upload failed",
-                    "The media archive could not be uploaded to storage, and "
-                    f"it is too large ({zip_size // (1024 * 1024)} MB) to "
-                    "send as a Discord attachment. Please try again later or "
-                    "contact an administrator.",
-                )),
+                discord_client,
+                redis_pool,
+                db_pool,
+                job_id,
+                requester_id,
+                guild_id,
+                only_me,
+                DeliveryPayload(
+                    embed=_error_embed(
+                        "Upload failed",
+                        "The media archive could not be uploaded to storage, and "
+                        f"it is too large ({zip_size // (1024 * 1024)} MB) to "
+                        "send as a Discord attachment. Please try again later or "
+                        "contact an administrator.",
+                    )
+                ),
             )
             zip_buffer.close()
             return {"ok": False, "reason": "upload_failed_too_large"}
@@ -352,11 +419,21 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     # --- Phase D: deliver the SAS link --------------------------------------
     try:
         await deliver(
-            discord_client, redis_pool, db_pool, job_id,
-            requester_id, guild_id, only_me,
-            DeliveryPayload(embed=_success_embed(
-                sas_url, image_count, video_count, requester_tag,
-            )),
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(
+                embed=_success_embed(
+                    sas_url,
+                    image_count,
+                    video_count,
+                    requester_tag,
+                )
+            ),
         )
         return {"ok": True, "sas_url": sas_url}
     finally:

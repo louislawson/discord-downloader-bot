@@ -8,7 +8,7 @@ window and lets independent channels run in parallel.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import discord
 from discord.ext import commands
@@ -70,9 +70,7 @@ class Download(commands.Cog, name="download"):
         await context.defer(ephemeral=only_me)
 
         if self.bot.arq_pool is None:
-            self.bot.logger.error(
-                "Download requested but ARQ pool is not initialised"
-            )
+            self.bot.logger.error("Download requested but ARQ pool is not initialised")
             await context.send(
                 embed=_error_embed(
                     "Service unavailable",
@@ -91,13 +89,15 @@ class Download(commands.Cog, name="download"):
             "requester_id": context.author.id,
             "requester_tag": str(context.author),
             "only_me": only_me,
-            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "requested_at": datetime.now(UTC).isoformat(),
             "allowed_media_types": list(settings.ALLOWED_MEDIA_TYPES),
         }
 
         try:
             await self.bot.arq_pool.enqueue_job(
-                "download_channel_media", payload, _job_id=job_id,
+                "download_channel_media",
+                payload,
+                _job_id=job_id,
             )
         except Exception as e:
             # Pool was alive at startup but Redis went away mid-flight (broker
@@ -105,7 +105,9 @@ class Download(commands.Cog, name="download"):
             # service-unavailable embed the ``arq_pool is None`` branch uses
             # so the requester gets a consistent message.
             self.bot.logger.exception(
-                "Failed to enqueue download job %s: %s", job_id, e,
+                "Failed to enqueue download job %s: %s",
+                job_id,
+                e,
             )
             await context.send(
                 embed=_error_embed(
@@ -119,11 +121,15 @@ class Download(commands.Cog, name="download"):
 
         self.bot.logger.info(
             "Enqueued download job %s for channel %s (requester=%s, only_me=%s)",
-            job_id, context.channel.id, context.author.id, only_me,
+            job_id,
+            context.channel.id,
+            context.author.id,
+            only_me,
         )
 
         await context.send(
-            embed=_queued_embed(job_id, only_me), ephemeral=only_me,
+            embed=_queued_embed(job_id, only_me),
+            ephemeral=only_me,
         )
 
 

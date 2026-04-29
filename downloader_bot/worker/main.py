@@ -10,7 +10,7 @@ database connections. ``on_shutdown`` closes them on the way out.
 """
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 import discord
 
@@ -19,7 +19,6 @@ from downloader_bot.db.pool import open_pool as open_db_pool
 from downloader_bot.queue_client import redis_settings
 from downloader_bot.worker.discord_rest import open_client
 from downloader_bot.worker.jobs import download_channel_media
-
 
 logger = logging.getLogger("downloader_bot.worker")
 logger.setLevel(settings.LOGGING_LEVEL)
@@ -85,7 +84,7 @@ async def on_shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """ARQ worker configuration. ``arq`` discovers this class by import path."""
 
-    functions = [noop_job, download_channel_media]
+    functions: ClassVar = [noop_job, download_channel_media]
     redis_settings = redis_settings()
     on_startup = on_startup
     on_shutdown = on_shutdown

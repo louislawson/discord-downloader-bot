@@ -6,7 +6,6 @@ import asyncpg
 
 from downloader_bot.config import settings
 
-
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
