@@ -3,7 +3,6 @@
 import logging
 import os
 import platform
-import random
 from typing import ClassVar
 
 import asyncpg
@@ -15,6 +14,7 @@ from discord.ext.commands import Context, errors
 
 from downloader_bot.config import settings
 from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
+from downloader_bot.presence import STATUSES, cycle_random
 from downloader_bot.queue_client import open_pool
 
 intents = discord.Intents.default()
@@ -103,6 +103,7 @@ class DiscordBot(commands.Bot):
         self.healthcheck_server = None
         self.arq_pool: ArqRedis | None = None
         self.db_pool: asyncpg.Pool | None = None
+        self._status_picker = cycle_random(STATUSES)
 
     async def load_cogs(self) -> None:
         """Load all cog extensions from the /cogs directory."""
@@ -128,8 +129,7 @@ class DiscordBot(commands.Bot):
     @tasks.loop(minutes=1.0)
     async def status_task(self) -> None:
         """Cycle the bot's presence status."""
-        statuses = ["with you!"]
-        await self.change_presence(activity=discord.Game(random.choice(statuses)))
+        await self.change_presence(activity=discord.Game(next(self._status_picker)))
 
     @status_task.before_loop
     async def before_status_task(self) -> None:
