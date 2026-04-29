@@ -8,7 +8,7 @@
 FROM python:3.12.12-slim-trixie AS builder
 
 # Prevents packages from attempting to ask for user info for configs
-ENV DEBIAN_FRONTEND=noninteractive 
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build tools
 RUN apt update \
@@ -84,12 +84,12 @@ FROM python:3.12.12-slim-trixie AS prod
 # Install any non-build tool packages, and just the stuff needed to run
 # Tini - Our PID1 for this container, which will be the init. Tini prevents creating zombie processes and forwards signals properly
 # ca-certificates - Needed in case of any SSL connections that might be used
-# bash - Our shell for this container 
+# bash - Our shell for this container
 RUN apt update \
   && apt install -y --no-install-recommends \
   tini \
   ca-certificates \
-  bash 
+  bash
 
 # Ship the entire application package. New top-level files added under
 # downloader_bot/ are picked up automatically — no Dockerfile edit required.
