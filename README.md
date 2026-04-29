@@ -115,6 +115,63 @@ downloader-bot/
 └── .env.example
 ```
 
+## Development
+
+Tests, lint, and format are wired up via [pytest](https://docs.pytest.org/), [ruff](https://docs.astral.sh/ruff/), and [pre-commit](https://pre-commit.com/). Tests are unit-only with mocks for Discord, Azure, asyncpg, and ARQ-Redis — no compose stack needed to run them. Configuration lives in [pyproject.toml](pyproject.toml) (ruff + pytest + coverage) and [.pre-commit-config.yaml](.pre-commit-config.yaml).
+
+### One-time setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+make install-dev                    # installs requirements-dev.txt + runs `pre-commit install`
+```
+
+`make install-dev` also wires up pre-commit so the ruff + whitespace hooks run on every `git commit`.
+
+### Daily commands
+
+| Make target           | Equivalent direct invocation                                                          | What it does                                                            |
+| --------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `make test`           | `python -m pytest`                                                                    | Runs the test suite.                                                    |
+| `make test-cov`       | `python -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html`   | Runs tests with coverage; HTML report at `htmlcov/index.html`.          |
+| `make lint`           | `python -m ruff check downloader_bot tests`                                           | Lints without modifying files.                                          |
+| `make format`         | `python -m ruff format downloader_bot tests && python -m ruff check --fix ...`        | Auto-formats and applies safe lint fixes in place.                      |
+| `make format-check`   | `python -m ruff format --check downloader_bot tests`                                  | Verifies formatting without writing — the CI-friendly check.            |
+| `make check`          | `lint` + `format-check` + `test` in sequence                                          | One-shot pre-push gate. Exits non-zero if anything fails.               |
+| `make precommit`      | `pre-commit run --all-files`                                                          | Runs every pre-commit hook against the entire tree.                     |
+| `make clean`          | `rm -rf .pytest_cache .ruff_cache .coverage htmlcov` + `__pycache__` sweep            | Wipes tooling caches.                                                   |
+
+> **Windows without `make`**: `make` isn't bundled with Git Bash. Either `choco install make` once, or copy-paste the right-hand "direct invocation" column. Every target is a one-liner so the fallback is mechanical.
+
+### Recommended workflow for new code
+
+1. **Branch off `main`** and start writing — keep your editor's ruff integration on if you have one (the [Ruff VS Code extension](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff) reads `pyproject.toml` automatically).
+2. **Write the test alongside the code.** Mirror the package layout under [tests/](tests/) — e.g. a change to [downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py) belongs in [tests/worker/test_jobs.py](tests/worker/test_jobs.py). Use the existing fixtures in [tests/conftest.py](tests/conftest.py) and the per-layer `conftest.py`s rather than re-mocking from scratch.
+3. **Run a tight loop** while iterating:
+
+   ```bash
+   make test                                 # full suite, ~1.5s
+   python -m pytest tests/worker/test_jobs.py -k "happy_path"   # narrower, while debugging one branch
+   ```
+
+4. **Format + lint before committing**:
+
+   ```bash
+   make format        # rewrites files in place — safe to run any time
+   make check         # final gate: lint + format-check + test, exits non-zero on any failure
+   ```
+
+5. **Commit.** The pre-commit hooks (whitespace, end-of-file, ruff-check `--fix`, ruff-format) run automatically. If a hook *fixes* something, the commit aborts and the fixes are left unstaged — `git add` the changes and commit again. If a hook *fails* without auto-fixing, fix the issue and re-stage.
+6. **Push.** No CI is wired up yet, so `make check` is your last line of defence. Run it before opening a PR.
+
+A few things worth knowing about the test setup:
+
+- `asyncio_mode = "auto"` in [pyproject.toml](pyproject.toml) means every `async def test_*` is treated as an asyncio test — no `@pytest.mark.asyncio` boilerplate.
+- The cross-cutting [tests/conftest.py](tests/conftest.py) sets required env vars (`TOKEN`, `ST_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because [downloader_bot/config.py](downloader_bot/config.py) constructs the `settings` singleton at import.
+- For mocking `async for` over `channel.history(...)`, use the `_AsyncIter` helper in [tests/worker/conftest.py](tests/worker/conftest.py) — `AsyncMock` returns coroutines, which `async for` rejects.
+- There is no coverage threshold yet (`--cov-fail-under` is intentionally unset). `make test-cov` is a baseline-tracking tool, not a gate.
+
 ## How It Works
 
 `/download` is split between the bot and a worker process so big-channel zips outlive Discord's 15-minute interaction-token window:
