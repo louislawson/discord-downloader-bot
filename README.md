@@ -11,7 +11,9 @@ The bot itself only enqueues jobs — a separate ARQ worker (same image, differe
 - **`/setup channel <#channel>`** — Server-owner only. Sets the channel used by `channel` mode (and as the fallback for `both`).
 - **`/setup clear`** — Server-owner only. Unsets the configured results channel.
 - **`/setup show`** — Server-owner only. Displays current delivery settings.
+- **`/invite`** — DMs the requester the bot's invite link (configured via `INVITE_LINK`); falls back to an ephemeral channel reply if DMs are blocked.
 - **`/sync`** — Bot-owner only. Re-registers slash commands globally or per-guild. Run this after deploying new commands.
+- **`<PREFIX>queueping`** — Bot-owner only, prefix-only. Enqueues a `noop_job` to verify the bot↔worker round trip without exercising the download path.
 
 All commands are hybrid — they work with the configured `PREFIX` (e.g. `??download`) as well as the slash-command UI.
 
@@ -66,22 +68,23 @@ For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point 
 
 ## Configuration
 
-All configuration is loaded from `.env` via `python-dotenv`. Copy `.env.example` and fill in the values.
+All configuration is loaded from `.env` by [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (see [downloader_bot/config.py](downloader_bot/config.py)). Copy `.env.example` and fill in the values.
 
-| Variable              | Required | Description                                                                                                                            |
-| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `TOKEN`               | yes      | Discord bot token.                                                                                                                     |
-| `PREFIX`              | yes      | Prefix for text commands (e.g. `??`). Slash commands always work regardless.                                                           |
-| `ENVIRONMENT`         | yes      | `prod` or `dev`. Toggles the SAS URL hostname rewrite.                                                                                 |
-| `ALLOWED_MEDIA_TYPES` | yes      | JSON array of MIME types to collect (see `.env.example`). Attachments outside this list are silently skipped.                          |
-| `AZURE_CONN_STR`         | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                      |
-| `AZURE_CONTAINER`        | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                            |
-| `POSTGRES_DSN`        | yes      | asyncpg DSN for the Postgres instance holding per-guild settings. Defaults to the compose-stack value.                                 |
-| `REDIS_URL`           | yes      | URL of the Redis broker used as the ARQ job queue. Defaults to the compose-stack value.                                                |
-| `AZURE_INT_URL`          | dev only | Internal Azure Storage URL — the hostname the bot uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`).    |
-| `AZURE_EXT_URL`          | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                      |
-| `LOGGING_LEVEL`       | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                               |
-| `INVITE_LINK`         | no       | Stored on the bot instance for reference; not currently surfaced to users.                                                             |
+| Variable              | Required | Description                                                                                                                         |
+| --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `TOKEN`               | yes      | Discord bot token.                                                                                                                  |
+| `PREFIX`              | yes      | Prefix for text commands (e.g. `??`). Slash commands always work regardless.                                                        |
+| `ENVIRONMENT`         | yes      | `prod` or `dev`. Toggles the SAS URL hostname rewrite.                                                                              |
+| `ALLOWED_MEDIA_TYPES` | yes      | JSON array of MIME types to collect (see `.env.example`). Attachments outside this list are silently skipped.                       |
+| `STORAGE_BACKEND`     | yes      | Object-storage backend. Currently only `azure` is supported; the storage layer dispatches on this value.                            |
+| `AZURE_CONN_STR`      | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                   |
+| `AZURE_CONTAINER`     | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                         |
+| `POSTGRES_DSN`        | yes      | asyncpg DSN for the Postgres instance holding per-guild settings. Defaults to the compose-stack value.                              |
+| `REDIS_URL`           | yes      | URL of the Redis broker used as the ARQ job queue. Defaults to the compose-stack value.                                             |
+| `AZURE_INT_URL`       | dev only | Internal Azure Storage URL — the hostname the bot uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`). |
+| `AZURE_EXT_URL`       | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                   |
+| `LOGGING_LEVEL`       | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                            |
+| `INVITE_LINK`         | no       | Bot invite URL surfaced by `/invite`. If unset, `/invite` will DM a broken link — set this to a real OAuth invite URL.              |
 
 ## Project Layout
 
@@ -90,13 +93,15 @@ downloader-bot/
 ├── downloader_bot/         # Application package — drop new modules here
 │   ├── bot.py              # Bot entry point: gateway client, cog loader, global error handler
 │   ├── config.py           # pydantic-settings singleton loaded from .env
+│   ├── presence.py         # Status strings + the no-repeat picker used by bot.status_task
 │   ├── queue_client.py     # ARQ pool factory used by the bot to enqueue jobs
 │   ├── cogs/
 │   │   ├── download.py     # /download — validates and enqueues, replies with a "queued" ack
 │   │   ├── setup.py        # /setup — server-owner-only per-guild delivery config
-│   │   └── owner.py        # /sync command for slash-command registration
+│   │   ├── general.py      # /invite — DMs the configured INVITE_LINK
+│   │   └── owner.py        # <PREFIX>sync (slash-command registration) + <PREFIX>queueping (smoke-test)
 │   ├── worker/
-│   │   ├── main.py         # ARQ WorkerSettings + on_startup/on_shutdown hooks
+│   │   ├── main.py         # ARQ WorkerSettings + on_startup/on_shutdown hooks (registers download_channel_media + noop_job)
 │   │   ├── jobs.py         # download_channel_media job (the four-phase pipeline)
 │   │   ├── delivery.py     # DM/channel routing + Redis-backed idempotency
 │   │   └── discord_rest.py # REST-only Discord client factory used by the worker
