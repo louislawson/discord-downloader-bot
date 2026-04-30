@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Media filter — pydantic auto-parses JSON for list-typed fields
     ALLOWED_MEDIA_TYPES: list[str] = Field(default_factory=list)
 
-    STORAGE_BACKEND: str = "azure"
+    STORAGE_BACKEND: Literal["azure"] = "azure"
 
     # Azure Blob Storage
     AZURE_CONN_STR: str
