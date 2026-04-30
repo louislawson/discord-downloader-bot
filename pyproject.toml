@@ -1,3 +1,19 @@
+[project]
+name = "downloader-bot"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "aiohttp",
+  "discord.py==2.6.4",
+  "pydantic-settings==2.14.0",
+  "discordhealthcheck==0.1.1",
+  "arq==0.26.3",
+  "asyncpg==0.30.0",
+]
+
+[project.optional-dependencies]
+azure = ["azure-storage-blob==12.28.0"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"
@@ -21,7 +37,6 @@ ignore = [
   "B008",   # discord.py decorators legitimately use call-in-default
   "E501",   # line length deferred to ruff format
   "N818",   # NotGuildOwner / Retry / RetryJob aren't *Error
-  "SIM117", # nested-with reads better in ContainerRepository pattern
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -66,3 +81,7 @@ exclude_lines = [
   "raise NotImplementedError",
   "if __name__ == .__main__.:",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["downloader_bot*", "wheels"]

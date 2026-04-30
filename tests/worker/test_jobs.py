@@ -1,6 +1,6 @@
 """Branch tests for ``download_channel_media`` — the four-phase ARQ pipeline.
 
-Mocks ``deliver`` and ``ContainerRepository`` at the import site in
+Mocks ``deliver`` and ``get_storage_backend`` at the import site in
 ``downloader_bot.worker.jobs``. ``ZipFile`` and ``BytesIO`` are real so the
 size-fallback branch is meaningful.
 """
@@ -12,8 +12,8 @@ import pytest
 from arq.worker import Retry
 
 from downloader_bot.storage.exceptions import (
-    BlobUploadError,
-    ContainerConfigError,
+    StorageConfigError,
+    UploadError,
 )
 from downloader_bot.worker.jobs import download_channel_media
 
@@ -32,8 +32,8 @@ def _payload(**overrides):
     return base
 
 
-def _container_cm(repo):
-    """Wrap ``repo`` as the async-context-manager that ``ContainerRepository()`` returns."""
+def _backend_cm(repo):
+    """Wrap ``repo`` as the async-context-manager that ``get_storage_backend()`` returns."""
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=repo)
     cm.__aexit__ = AsyncMock(return_value=False)
@@ -85,24 +85,18 @@ class TestHappyPath:
         arq_ctx["discord_client"].fetch_channel.return_value = channel
 
         repo = MagicMock()
-        repo.create = AsyncMock(
-            return_value=MagicMock(
-                blob_name="testchannel-media.zip",
-                url="http://azurite:10000/media/testchannel-media.zip",
-            ),
-        )
-        repo.sas_url = AsyncMock(
-            return_value="http://azurite:10000/media/testchannel-media.zip?sas",
+        repo.upload_and_sign = AsyncMock(
+            return_value="http://localhost:10000/media/testchannel-media.zip?sas",
         )
         mocker.patch(
-            "downloader_bot.worker.jobs.ContainerRepository",
-            return_value=_container_cm(repo),
+            "downloader_bot.worker.jobs.get_storage_backend",
+            return_value=_backend_cm(repo),
         )
 
         result = await download_channel_media(arq_ctx, _payload())
 
         assert result["ok"] is True
-        # Dev URL rewrite happened: ST_INT_URL → ST_EXT_URL.
+        # Dev URL rewrite happened inside the backend: AZURE_INT_URL → AZURE_EXT_URL.
         assert result["sas_url"].startswith("http://localhost:10000/")
         mock_deliver.assert_awaited_once()
         delivered = mock_deliver.await_args.args[-1]
@@ -159,7 +153,7 @@ class TestForbiddenHistory:
 
 
 class TestStorageErrors:
-    async def test_container_config_error_returns_config_reason(
+    async def test_storage_config_error_returns_config_reason(
         self,
         arq_ctx,
         mocker,
@@ -175,10 +169,10 @@ class TestStorageErrors:
         arq_ctx["discord_client"].fetch_channel.return_value = channel
 
         cm = MagicMock()
-        cm.__aenter__ = AsyncMock(side_effect=ContainerConfigError("missing"))
+        cm.__aenter__ = AsyncMock(side_effect=StorageConfigError("missing"))
         cm.__aexit__ = AsyncMock(return_value=False)
         mocker.patch(
-            "downloader_bot.worker.jobs.ContainerRepository",
+            "downloader_bot.worker.jobs.get_storage_backend",
             return_value=cm,
         )
 
@@ -205,10 +199,10 @@ class TestStorageErrors:
         arq_ctx["discord_client"].fetch_channel.return_value = channel
 
         repo = MagicMock()
-        repo.create = AsyncMock(side_effect=BlobUploadError("azure down"))
+        repo.upload_and_sign = AsyncMock(side_effect=UploadError("azure down"))
         mocker.patch(
-            "downloader_bot.worker.jobs.ContainerRepository",
-            return_value=_container_cm(repo),
+            "downloader_bot.worker.jobs.get_storage_backend",
+            return_value=_backend_cm(repo),
         )
 
         result = await download_channel_media(arq_ctx, _payload())
@@ -240,10 +234,10 @@ class TestStorageErrors:
         arq_ctx["discord_client"].fetch_channel.return_value = channel
 
         repo = MagicMock()
-        repo.create = AsyncMock(side_effect=BlobUploadError("azure down"))
+        repo.upload_and_sign = AsyncMock(side_effect=UploadError("azure down"))
         mocker.patch(
-            "downloader_bot.worker.jobs.ContainerRepository",
-            return_value=_container_cm(repo),
+            "downloader_bot.worker.jobs.get_storage_backend",
+            return_value=_backend_cm(repo),
         )
 
         result = await download_channel_media(arq_ctx, _payload())

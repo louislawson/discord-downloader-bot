@@ -13,12 +13,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import discord
 from arq.worker import Retry, RetryJob
 
-from downloader_bot.config import settings
-from downloader_bot.storage.container import ContainerRepository
+from downloader_bot.storage import get_storage_backend
 from downloader_bot.storage.exceptions import (
-    BlobUploadError,
-    ContainerConfigError,
-    SasGenerationError,
+    SignedUrlError,
+    StorageConfigError,
+    UploadError,
 )
 from downloader_bot.worker.delivery import DeliveryPayload, deliver
 
@@ -92,7 +91,7 @@ def _attachment_fallback_embed(
     embed = discord.Embed(
         title="Channel Media Download (direct attachment)",
         description=(
-            "Azure storage was unavailable, so the archive is attached "
+            "Cloud storage was unavailable, so the archive is attached "
             "directly. Note: this file will expire when Discord removes "
             "the attachment."
         ),
@@ -142,7 +141,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     are re-raised untouched so ARQ's retry signaling still works if a
     future code path uses it.
 
-    Anticipated errors (Forbidden history walks, missing Azure config,
+    Anticipated errors (Forbidden history walks, missing storage config,
     upload failures with attachment fallback, etc.) are handled inside the
     body and produce their own targeted embeds — this wrapper only fires
     for everything else (network blips, transient Discord 5xx, unexpected
@@ -178,8 +177,9 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
 
 async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     """
-    Bundle a channel's allowed-MIME attachments into a zip, upload to Azure,
-    and deliver the SAS link (or fallback attachment) via DM/channel.
+    Bundle a channel's allowed-MIME attachments into a zip, upload via the
+    configured storage backend, and deliver the pre-signed link (or fallback
+    attachment) via DM/channel.
 
     The four phases match the original cog: collect → validate → upload →
     deliver. ``deliver`` handles DM/channel routing and idempotency.
@@ -327,25 +327,18 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     zip_filename = f"{getattr(channel, 'name', 'channel')}-media.zip"
     zip_size = zip_buffer.getbuffer().nbytes
 
-    # --- Phase C: upload to Azure -------------------------------------------
+    # --- Phase C: upload to storage -----------------------------------------
     guild = await _resolve_guild(discord_client, guild_id)
     upload_limit = _guild_upload_limit(guild)
 
     try:
-        async with ContainerRepository() as container:
-            blob_client = await container.create(
+        async with get_storage_backend() as storage:
+            signed_url = await storage.upload_and_sign(
                 name=zip_filename,
                 data=zip_buffer,
                 overwrite=True,
             )
-            sas_url = await container.sas_url(
-                blob_name=blob_client.blob_name,
-                blob_url=blob_client.url,
-            )
-            if settings.ENVIRONMENT == "dev":
-                sas_url = sas_url.replace(settings.ST_INT_URL, settings.ST_EXT_URL)
-
-    except ContainerConfigError:
+    except StorageConfigError:
         logger.exception("Job %s: storage misconfigured", job_id)
         await deliver(
             discord_client,
@@ -366,9 +359,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
         zip_buffer.close()
         return {"ok": False, "reason": "config"}
 
-    except (BlobUploadError, SasGenerationError) as e:
+    except (UploadError, SignedUrlError) as e:
         logger.exception(
-            "Job %s: Azure storage failed (%s) — attempting attachment fallback",
+            "Job %s: storage backend failed (%s) — attempting attachment fallback",
             job_id,
             type(e).__name__,
         )
@@ -428,14 +421,14 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
             only_me,
             DeliveryPayload(
                 embed=_success_embed(
-                    sas_url,
+                    signed_url,
                     image_count,
                     video_count,
                     requester_tag,
                 )
             ),
         )
-        return {"ok": True, "sas_url": sas_url}
+        return {"ok": True, "sas_url": signed_url}
     finally:
         if not zip_buffer.closed:
             zip_buffer.close()

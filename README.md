@@ -23,9 +23,9 @@ The dev environment uses Docker Compose to run the bot, an ARQ worker, Redis (jo
 cp .env.example .env
 # Fill in TOKEN at minimum. For Azurite, set:
 #   ENVIRONMENT=dev
-#   ST_INT_URL=http://azurite:10000/devstoreaccount1
-#   ST_EXT_URL=http://localhost:10000/devstoreaccount1
-#   ST_CONN_STR=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
+#   AZURE_INT_URL=http://azurite:10000/devstoreaccount1
+#   AZURE_EXT_URL=http://localhost:10000/devstoreaccount1
+#   AZURE_CONN_STR=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;
 # REDIS_URL and POSTGRES_DSN already point at the compose services.
 
 docker compose up --build -d
@@ -33,7 +33,7 @@ docker compose up --build -d
 
 Both the bot and worker run under [watchfiles](https://watchfiles.helpmanual.io/), so any `.py` change under [downloader_bot/](downloader_bot/) triggers an automatic restart. The repo is mounted into `/bot/` inside both containers.
 
-When `ENVIRONMENT=dev`, generated SAS URLs are rewritten from `ST_INT_URL` (the in-network Azurite hostname) to `ST_EXT_URL` (the host-reachable one) so links opened in your browser actually resolve — see [downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py).
+When `ENVIRONMENT=dev`, generated SAS URLs are rewritten from `AZURE_INT_URL` (the in-network Azurite hostname) to `AZURE_EXT_URL` (the host-reachable one) so links opened in your browser actually resolve — see [downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py).
 
 ## Production
 
@@ -62,7 +62,7 @@ The production image:
 - Uses [Tini](https://github.com/krallin/tini) as PID 1 for proper signal handling and zombie reaping
 - Exposes a Docker `HEALTHCHECK` via [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) that verifies the gateway connection every 60s (bot only — the worker has no gateway to check)
 
-For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point `ST_CONN_STR` at your real storage account.
+For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point `AZURE_CONN_STR` at your real storage account.
 
 ## Configuration
 
@@ -74,12 +74,12 @@ All configuration is loaded from `.env` via `python-dotenv`. Copy `.env.example`
 | `PREFIX`              | yes      | Prefix for text commands (e.g. `??`). Slash commands always work regardless.                                                           |
 | `ENVIRONMENT`         | yes      | `prod` or `dev`. Toggles the SAS URL hostname rewrite.                                                                                 |
 | `ALLOWED_MEDIA_TYPES` | yes      | JSON array of MIME types to collect (see `.env.example`). Attachments outside this list are silently skipped.                          |
-| `ST_CONN_STR`         | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                      |
-| `ST_CONTAINER`        | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                            |
+| `AZURE_CONN_STR`         | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                      |
+| `AZURE_CONTAINER`        | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                            |
 | `POSTGRES_DSN`        | yes      | asyncpg DSN for the Postgres instance holding per-guild settings. Defaults to the compose-stack value.                                 |
 | `REDIS_URL`           | yes      | URL of the Redis broker used as the ARQ job queue. Defaults to the compose-stack value.                                                |
-| `ST_INT_URL`          | dev only | Internal Azure Storage URL — the hostname the bot uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`).    |
-| `ST_EXT_URL`          | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                      |
+| `AZURE_INT_URL`          | dev only | Internal Azure Storage URL — the hostname the bot uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`).    |
+| `AZURE_EXT_URL`          | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                      |
 | `LOGGING_LEVEL`       | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                               |
 | `INVITE_LINK`         | no       | Stored on the bot instance for reference; not currently surfaced to users.                                                             |
 
@@ -105,13 +105,16 @@ downloader-bot/
 │   │   ├── pool.py         # asyncpg pool factory + init_schema runner
 │   │   └── guild_settings.py  # Read/write API for delivery mode + results channel
 │   └── storage/
-│       ├── container.py    # Async repository wrapping Azure ContainerClient
+│       ├── base.py         # StorageBackend ABC (upload_and_sign + async-CM)
+│       ├── azure.py        # AzureBlobBackend — wraps Azure ContainerClient
+│       ├── __init__.py     # get_storage_backend() factory (lazy provider import)
 │       └── exceptions.py   # Typed storage errors (config / upload / SAS)
 ├── scripts/
 │   └── start.sh            # Production entrypoint
 ├── Dockerfile              # Multi-stage: builder → dev → prod
 ├── docker-compose.yml      # Dev stack: bot + worker + redis + postgres + azurite
-├── requirements.txt
+├── pyproject.toml          # Project metadata + deps (azure backend via [azure] extra)
+├── requirements-dev.txt    # Test/lint/pre-commit tooling (installs `.[azure]` editable)
 └── .env.example
 ```
 
@@ -168,7 +171,7 @@ make install-dev                    # installs requirements-dev.txt + runs `pre-
 A few things worth knowing about the test setup:
 
 - `asyncio_mode = "auto"` in [pyproject.toml](pyproject.toml) means every `async def test_*` is treated as an asyncio test — no `@pytest.mark.asyncio` boilerplate.
-- The cross-cutting [tests/conftest.py](tests/conftest.py) sets required env vars (`TOKEN`, `ST_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because [downloader_bot/config.py](downloader_bot/config.py) constructs the `settings` singleton at import.
+- The cross-cutting [tests/conftest.py](tests/conftest.py) sets required env vars (`TOKEN`, `AZURE_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because [downloader_bot/config.py](downloader_bot/config.py) constructs the `settings` singleton at import.
 - For mocking `async for` over `channel.history(...)`, use the `_AsyncIter` helper in [tests/worker/conftest.py](tests/worker/conftest.py) — `AsyncMock` returns coroutines, which `async for` rejects.
 - There is no coverage threshold yet (`--cov-fail-under` is intentionally unset). `make test-cov` is a baseline-tracking tool, not a gate.
 
@@ -180,10 +183,10 @@ A few things worth knowing about the test setup:
 2. **Worker pipeline ([downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py)).** ARQ picks up the job and runs four phases:
    1. **Collect.** Walk channel history, filter attachments by `ALLOWED_MEDIA_TYPES`, stream each one into an in-memory `ZipFile` keyed by `{message_id}_{filename}`. Per-attachment failures are logged and skipped — one bad file doesn't abort the run.
    2. **Validate.** If no media was found, deliver a red error embed and stop.
-   3. **Upload.** Push the zip to Azure via [`ContainerRepository`](downloader_bot/storage/container.py) and generate a 1-hour SAS URL.
+   3. **Upload.** Push the zip via the configured [`StorageBackend`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs) and generate a 1-hour pre-signed URL via `upload_and_sign()`.
    4. **Deliver.** Send a green success embed with the link and a count of bundled files via [`downloader_bot/worker/delivery.py`](downloader_bot/worker/delivery.py), which routes between DM and the configured guild channel based on per-guild `/setup` settings (Postgres-backed). A Redis SET-NX claim keyed `delivered:{job_id}` makes delivery idempotent across ARQ retries.
 
-If the upload fails with `BlobUploadError`/`SasGenerationError` and the zip fits the guild's upload limit (8 MB / 50 MB / 100 MB depending on boost tier), the worker falls back to delivering the zip as a direct Discord attachment with an orange "Azure unavailable" embed. `ContainerConfigError` (missing storage credentials) is non-recoverable and surfaces as a hard error. Any other unhandled exception in the worker (transient Discord 5xx, network blips, unexpected SDK errors) gets a generic "Download failed" embed delivered to the requester before the exception re-raises, so a failed job never leaves the user staring at a "queued" message forever.
+If the upload fails with `UploadError`/`SignedUrlError` and the zip fits the guild's upload limit (8 MB / 50 MB / 100 MB depending on boost tier), the worker falls back to delivering the zip as a direct Discord attachment with an orange "Cloud storage unavailable" embed. `StorageConfigError` (missing storage credentials) is non-recoverable and surfaces as a hard error. Any other unhandled exception in the worker (transient Discord 5xx, network blips, unexpected SDK errors) gets a generic "Download failed" embed delivered to the requester before the exception re-raises, so a failed job never leaves the user staring at a "queued" message forever.
 
 Bot-side command errors are translated to user-facing embeds by a global handler in [downloader_bot/bot.py](downloader_bot/bot.py), so cogs raise typed exceptions rather than formatting messages themselves. The `downloader_bot/cogs/setup.py` cog adds a cog-local handler for its custom `NotGuildOwner` check.
 
