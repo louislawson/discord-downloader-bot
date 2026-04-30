@@ -19,13 +19,16 @@ RUN apt update \
 # Here we'll create a working directory and cd into it
 WORKDIR /bot
 
-# Copy over the requirements.txt from the base of the repo
-# The build context is '.' (which is the root of this repo)
-COPY /requirements.txt /bot/
+# Copy the project metadata + source. ``pip wheel '.[azure]'`` resolves
+# from [project] / [project.optional-dependencies] and builds a wheel for
+# the project itself, so it needs both the manifest and the package source.
+# The build context is '.' (which is the root of this repo).
+COPY /pyproject.toml /bot/
+COPY /downloader_bot /bot/downloader_bot
 
-# Instead of wasting time installing and building the wheels later, we'll export the requirements.txt libs as wheels to save time
-# This move is also cached, which saves a ton of time later on
-RUN pip wheel --wheel-dir=/bot/wheels -r requirements.txt
+# Pre-build wheels for the project and its runtime + active-backend deps.
+# Install stages then resolve offline against /bot/wheels by package name.
+RUN pip wheel --wheel-dir=/bot/wheels '.[azure]'
 
 ####################################################################################################
 ## Dev image
@@ -40,17 +43,17 @@ RUN apt update \
   ca-certificates \
   bash
 
-# Copy over the requirements.txt from the base of the repo
-COPY /requirements.txt /bot/
-
 # Copy over our wheels from the builder stage
 COPY --from=builder /bot/wheels /bot/wheels
 
 # Upgrade both pip and setuptools to the latest version. This will fix any issues with installing the wheels, and is good practice to do this as well
 RUN pip install --upgrade pip setuptools
 
-# Now we finally install all of our dependencies
-RUN pip install --user --no-index --find-links=/bot/wheels -r /bot/requirements.txt
+# Install the project + active-backend extra by name from the prebuilt
+# wheel cache. Resolving by name (not path) means the dev stage doesn't
+# need the source at build time — compose mounts it live at runtime, and
+# WORKDIR=/bot puts the live source ahead of site-packages on sys.path.
+RUN pip install --user --no-index --find-links=/bot/wheels 'downloader-bot[azure]'
 
 # ``--user`` installs land in /root/.local/bin; expose them on PATH so CLI
 # tools like ``arq`` (used by the worker compose service) resolve correctly.
@@ -94,7 +97,7 @@ RUN apt update \
 # Ship the entire application package. New top-level files added under
 # downloader_bot/ are picked up automatically — no Dockerfile edit required.
 COPY /downloader_bot /bot/downloader_bot
-COPY /requirements.txt /bot/
+COPY /pyproject.toml /bot/
 
 # Copy over our start shell file. This will be used to create environment variables for the token of the bot
 COPY /scripts/start.sh /bot/start.sh
@@ -126,8 +129,10 @@ WORKDIR /bot
 # But we don't need it for this bot, but we'll have it here to stop pip from complaining again
 ENV PATH="${PATH}:/home/discordbot/.local/bin"
 
-# Now we finally install all of our  dependencies
-RUN pip install --user --no-index --find-links=/bot/wheels -r /bot/requirements.txt
+# Install the project + active-backend extra by name from the prebuilt
+# wheel cache. The local /bot/downloader_bot copy COPYed above stays on
+# sys.path via WORKDIR=/bot, so imports resolve to the shipped source.
+RUN pip install --user --no-index --find-links=/bot/wheels 'downloader-bot[azure]'
 
 # Set up tini
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -1,29 +1,30 @@
 """Azure Container Blob service module."""
 
 from datetime import UTC, datetime, timedelta
+from typing import IO
 
 from azure.core.exceptions import AzureError
 from azure.storage.blob import (
     BlobSasPermissions,
     BlobType,
-    ContentSettings,
     generate_blob_sas,
 )
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
 from downloader_bot.config import settings
-from downloader_bot.storage.exceptions import BlobUploadError, SasGenerationError
+from downloader_bot.storage.base import StorageBackend
+from downloader_bot.storage.exceptions import SignedUrlError, UploadError
 
 
 def _build_client() -> ContainerClient:
     """Build a ContainerClient from the centralised settings object."""
     return ContainerClient.from_connection_string(
-        conn_str=settings.ST_CONN_STR,
-        container_name=settings.ST_CONTAINER,
+        conn_str=settings.AZURE_CONN_STR,
+        container_name=settings.AZURE_CONTAINER,
     )
 
 
-class ContainerRepository:
+class AzureBlobBackend(StorageBackend):
     """
     A wrapper class for async interactions with Azure Blob Storage containers.
 
@@ -32,18 +33,18 @@ class ContainerRepository:
     object (which validates required values at startup).
 
     All Azure errors are caught and re-raised as domain-specific exceptions
-    (``BlobUploadError``, ``SasGenerationError``) so callers can handle
+    (``UploadError``, ``SignedUrlError``) so callers can handle
     failure cases without depending on the azure-storage-blob package.
 
     Usage::
 
         # Production — reads from settings
-        async with ContainerRepository() as repo:
+        async with AzureBlobBackend() as repo:
             blob_client = await repo.create(name="file.zip", data=data)
             url = await repo.sas_url(blob_client.blob_name, blob_client.url)
 
         # Testing — inject a mock client
-        async with ContainerRepository(client=mock_client) as repo:
+        async with AzureBlobBackend(client=mock_client) as repo:
             ...
 
     Attributes:
@@ -52,7 +53,7 @@ class ContainerRepository:
 
     def __init__(self, client: ContainerClient | None = None) -> None:
         """
-        Initialise the ContainerRepository.
+        Initialise the AzureBlobBackend.
 
         Args:
             client (ContainerClient, optional): An injected container client.
@@ -60,7 +61,7 @@ class ContainerRepository:
         """
         self.con_client: ContainerClient = client or _build_client()
 
-    async def __aenter__(self) -> "ContainerRepository":
+    async def __aenter__(self) -> "AzureBlobBackend":
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -71,12 +72,8 @@ class ContainerRepository:
         self,
         name: str,
         data: bytes | str,
-        length: int | None = None,
         blob_type: BlobType = BlobType.BLOCKBLOB,
-        metadata: dict[str, str] | None = None,
-        content_settings: ContentSettings | None = None,
         overwrite: bool = False,
-        tags: dict[str, str] | None = None,
     ) -> BlobClient:
         """
         Upload a new blob to the container.
@@ -84,33 +81,24 @@ class ContainerRepository:
         Args:
             name (str): The name of the blob.
             data (bytes | str): The content of the blob.
-            length (int, optional): The length of the data in bytes.
             blob_type (BlobType): The type of blob to create.
-            metadata (dict[str, str], optional): Metadata to associate with the blob.
-            content_settings (ContentSettings, optional): Blob content settings
-                (e.g. content type, encoding).
             overwrite (bool): Whether to overwrite an existing blob of the same name.
-            tags (dict[str, str], optional): Index tags to associate with the blob.
 
         Returns:
             BlobClient: A client for the uploaded blob.
 
         Raises:
-            BlobUploadError: If the upload fails for any reason.
+            UploadError: If the upload fails for any reason.
         """
         try:
             return await self.con_client.upload_blob(
                 name=name,
                 data=data,
                 blob_type=blob_type,
-                length=length,
-                metadata=metadata,
-                content_settings=content_settings,
                 overwrite=overwrite,
-                tags=tags,
             )
         except AzureError as e:
-            raise BlobUploadError(
+            raise UploadError(
                 f"Failed to upload blob '{name}' to container "
                 f"'{self.con_client.container_name}': {e}"
             ) from e
@@ -137,14 +125,14 @@ class ContainerRepository:
             str: A fully-signed SAS URL for the blob.
 
         Raises:
-            SasGenerationError: If the credential is incompatible or Azure
+            SignedUrlError: If the credential is incompatible or Azure
                 SAS generation fails.
         """
         credential = self.con_client.credential
         if not hasattr(credential, "account_key") or not credential.account_key:
-            raise SasGenerationError(
+            raise SignedUrlError(
                 "SAS URL generation requires an account key credential. "
-                "Ensure ST_CONN_STR contains an AccountKey, or pass a client "
+                "Ensure AZURE_CONN_STR contains an AccountKey, or pass a client "
                 "configured with account key auth."
             )
 
@@ -162,7 +150,7 @@ class ContainerRepository:
                 start=valid_from,
             )
         except AzureError as e:
-            raise SasGenerationError(
+            raise SignedUrlError(
                 f"Failed to generate SAS token for blob '{blob_name}': {e}"
             ) from e
 
@@ -170,3 +158,36 @@ class ContainerRepository:
             blob_url=blob_url,
             credential=sas_token,
         ).url
+
+    async def upload_and_sign(
+        self,
+        name: str,
+        data: bytes | IO[bytes],
+        *,
+        ttl: timedelta = timedelta(hours=1),
+        overwrite: bool = True,
+    ) -> str:
+        """Upload ``data`` under key ``name`` and return a pre-signed URL.
+
+        Raises:
+            UploadError: upload step failed.
+            SignedUrlError: upload succeeded but URL signing failed.
+            StorageConfigError: backend is misconfigured (non-recoverable).
+        """
+        blob_client = await self.create(
+            name=name,
+            data=data,
+            overwrite=overwrite,
+        )
+        sas_url = await self.sas_url(
+            blob_name=blob_client.blob_name,
+            blob_url=blob_client.url,
+            valid_to=datetime.now(UTC) + ttl,
+        )
+        if (
+            settings.ENVIRONMENT == "dev"
+            and settings.AZURE_INT_URL
+            and settings.AZURE_EXT_URL
+        ):
+            sas_url = sas_url.replace(settings.AZURE_INT_URL, settings.AZURE_EXT_URL)
+        return sas_url

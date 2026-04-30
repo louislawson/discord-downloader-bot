@@ -4,7 +4,7 @@ PYTHON ?= python
 PIP    ?= $(PYTHON) -m pip
 
 install:
-	$(PIP) install -r requirements.txt
+	$(PIP) install '.[azure]'
 
 install-dev:
 	$(PIP) install -r requirements-dev.txt

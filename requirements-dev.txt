@@ -1,4 +1,4 @@
--r requirements.txt
+-e .[azure]
 pytest==8.4.2
 pytest-asyncio==1.2.0
 pytest-cov==6.3.0

@@ -12,19 +12,19 @@ import os
 os.environ.setdefault("TOKEN", "test-token")
 os.environ.setdefault("PREFIX", "!")
 os.environ.setdefault(
-    "ST_CONN_STR",
+    "AZURE_CONN_STR",
     "DefaultEndpointsProtocol=https;AccountName=testaccount;"
     "AccountKey=dGVzdGtleQ==;EndpointSuffix=core.windows.net",
 )
-os.environ.setdefault("ST_CONTAINER", "media")
+os.environ.setdefault("AZURE_CONTAINER", "media")
 os.environ.setdefault("POSTGRES_DSN", "postgresql://test:test@localhost/test")
 os.environ.setdefault(
     "ALLOWED_MEDIA_TYPES",
     '["image/png", "image/jpeg", "video/mp4"]',
 )
 os.environ.setdefault("ENVIRONMENT", "dev")
-os.environ.setdefault("ST_INT_URL", "http://azurite:10000")
-os.environ.setdefault("ST_EXT_URL", "http://localhost:10000")
+os.environ.setdefault("AZURE_INT_URL", "http://azurite:10000")
+os.environ.setdefault("AZURE_EXT_URL", "http://localhost:10000")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 
@@ -82,8 +82,8 @@ def mock_blob_client():
 
 
 @pytest.fixture
-def mock_container_client(mock_blob_client):
-    """Mock ContainerClient suitable for ``ContainerRepository(client=...)``.
+def mock_azure_client(mock_blob_client):
+    """Mock ContainerClient suitable for ``AzureBlobBackend(client=...)``.
 
     Exposes the attributes ``sas_url`` inspects: ``account_name``,
     ``container_name``, and ``credential.account_key`` (truthy).

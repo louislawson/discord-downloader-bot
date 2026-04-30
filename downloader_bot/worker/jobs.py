@@ -13,12 +13,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import discord
 from arq.worker import Retry, RetryJob
 
-from downloader_bot.config import settings
-from downloader_bot.storage.container import ContainerRepository
+from downloader_bot.storage import get_storage_backend
 from downloader_bot.storage.exceptions import (
-    BlobUploadError,
-    ContainerConfigError,
-    SasGenerationError,
+    SignedUrlError,
+    StorageConfigError,
+    UploadError,
 )
 from downloader_bot.worker.delivery import DeliveryPayload, deliver
 
@@ -332,20 +331,13 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     upload_limit = _guild_upload_limit(guild)
 
     try:
-        async with ContainerRepository() as container:
-            blob_client = await container.create(
+        async with get_storage_backend() as storage:
+            signed_url = await storage.upload_and_sign(
                 name=zip_filename,
                 data=zip_buffer,
                 overwrite=True,
             )
-            sas_url = await container.sas_url(
-                blob_name=blob_client.blob_name,
-                blob_url=blob_client.url,
-            )
-            if settings.ENVIRONMENT == "dev":
-                sas_url = sas_url.replace(settings.ST_INT_URL, settings.ST_EXT_URL)
-
-    except ContainerConfigError:
+    except StorageConfigError:
         logger.exception("Job %s: storage misconfigured", job_id)
         await deliver(
             discord_client,
@@ -366,7 +358,7 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
         zip_buffer.close()
         return {"ok": False, "reason": "config"}
 
-    except (BlobUploadError, SasGenerationError) as e:
+    except (UploadError, SignedUrlError) as e:
         logger.exception(
             "Job %s: Azure storage failed (%s) — attempting attachment fallback",
             job_id,
@@ -428,14 +420,14 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
             only_me,
             DeliveryPayload(
                 embed=_success_embed(
-                    sas_url,
+                    signed_url,
                     image_count,
                     video_count,
                     requester_tag,
                 )
             ),
         )
-        return {"ok": True, "sas_url": sas_url}
+        return {"ok": True, "sas_url": signed_url}
     finally:
         if not zip_buffer.closed:
             zip_buffer.close()
