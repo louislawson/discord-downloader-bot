@@ -72,7 +72,7 @@ The split exists because zipping a busy channel routinely takes longer than Disc
 
 ### Fallback ladder (`downloader_bot/worker/jobs.py`)
 
-- `UploadError` / `SignedUrlError` → if `zip_size <= guild_upload_limit`, deliver the zip as a Discord attachment with an orange "Azure unavailable" embed; otherwise deliver a hard-error embed.
+- `UploadError` / `SignedUrlError` → if `zip_size <= guild_upload_limit`, deliver the zip as a Discord attachment with an orange "Cloud storage unavailable" embed; otherwise deliver a hard-error embed.
 - `StorageConfigError` is **non-recoverable** (deployment misconfig). Never falls back; always surfaces as a hard error.
 - Guild upload limit comes from `_guild_upload_limit()` (worker-local copy of the boost-tier table) — Tier 0/1: 8 MB, Tier 2: 50 MB, Tier 3: 100 MB, DM/unknown: 8 MB.
 - Guild upload limit needs a real `Guild` (REST `fetch_guild`) — `client.fetch_channel(...)`'s `.guild` is a placeholder `Object` in REST-only mode and lacks `premium_tier`.
@@ -106,7 +106,7 @@ pydantic-settings `Settings` model loaded from `.env`. Import the singleton: `fr
 - **Every directory under `downloader_bot/` is a regular package** with an `__init__.py` (usually empty). Don't add namespace-package tricks — keep these as plain packages so static analysers and IDE tooling resolve them cleanly.
 - **Job payloads must be JSON-serialisable.** ARQ pickles by default but we keep payloads JSON-friendly (ISO timestamps as strings, lists not sets) so they're inspectable in Redis and survive worker version skew.
 - **Schema changes** today mean editing `downloader_bot/db/schema.sql` and shipping; it re-runs idempotently on bot startup. If a migration ever needs to drop a column or backfill, that's the point at which alembic earns its keep — don't add it preemptively.
-- **All I/O is async.** Don't introduce synchronous Azure SDK or `requests` calls; use `azure.storage.blob.aio` and `aiohttp`.
+- **All I/O is async.** Don't introduce synchronous storage-SDK or `requests` calls; use the SDK's async client (`azure.storage.blob.aio` for the Azure backend) and `aiohttp` everywhere else.
 - **Keep the zip in-memory.** The `BytesIO` + streaming-into-`ZipFile` pattern in `downloader_bot/worker/jobs.py` is deliberate — there is no scratch directory, and adding one would regress an earlier optimisation.
 - **Hybrid commands** (`@commands.hybrid_command`/`@commands.hybrid_group`) need an owner to run `<PREFIX>sync global` (or `guild` for instant local testing) before the slash UI reflects changes.
 - **`only_me` flag on `/download`** propagates from the cog into the job payload and is honoured by `deliver()` (forces DM-only, fail-closed). The cog's initial `context.defer(ephemeral=only_me)` and ack `context.send(..., ephemeral=only_me)` must also respect it.

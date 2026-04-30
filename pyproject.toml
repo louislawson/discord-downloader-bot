@@ -37,7 +37,6 @@ ignore = [
   "B008",   # discord.py decorators legitimately use call-in-default
   "E501",   # line length deferred to ruff format
   "N818",   # NotGuildOwner / Retry / RetryJob aren't *Error
-  "SIM117", # nested-with reads better in ContainerRepository pattern
 ]
 
 [tool.ruff.lint.per-file-ignores]

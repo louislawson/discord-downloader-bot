@@ -91,7 +91,7 @@ def _attachment_fallback_embed(
     embed = discord.Embed(
         title="Channel Media Download (direct attachment)",
         description=(
-            "Azure storage was unavailable, so the archive is attached "
+            "Cloud storage was unavailable, so the archive is attached "
             "directly. Note: this file will expire when Discord removes "
             "the attachment."
         ),
@@ -141,7 +141,7 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     are re-raised untouched so ARQ's retry signaling still works if a
     future code path uses it.
 
-    Anticipated errors (Forbidden history walks, missing Azure config,
+    Anticipated errors (Forbidden history walks, missing storage config,
     upload failures with attachment fallback, etc.) are handled inside the
     body and produce their own targeted embeds — this wrapper only fires
     for everything else (network blips, transient Discord 5xx, unexpected
@@ -177,8 +177,9 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
 
 async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     """
-    Bundle a channel's allowed-MIME attachments into a zip, upload to Azure,
-    and deliver the SAS link (or fallback attachment) via DM/channel.
+    Bundle a channel's allowed-MIME attachments into a zip, upload via the
+    configured storage backend, and deliver the pre-signed link (or fallback
+    attachment) via DM/channel.
 
     The four phases match the original cog: collect → validate → upload →
     deliver. ``deliver`` handles DM/channel routing and idempotency.
@@ -326,7 +327,7 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     zip_filename = f"{getattr(channel, 'name', 'channel')}-media.zip"
     zip_size = zip_buffer.getbuffer().nbytes
 
-    # --- Phase C: upload to Azure -------------------------------------------
+    # --- Phase C: upload to storage -----------------------------------------
     guild = await _resolve_guild(discord_client, guild_id)
     upload_limit = _guild_upload_limit(guild)
 
@@ -360,7 +361,7 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
 
     except (UploadError, SignedUrlError) as e:
         logger.exception(
-            "Job %s: Azure storage failed (%s) — attempting attachment fallback",
+            "Job %s: storage backend failed (%s) — attempting attachment fallback",
             job_id,
             type(e).__name__,
         )
