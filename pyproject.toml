@@ -9,6 +9,7 @@ dependencies = [
   "discordhealthcheck==0.1.1",
   "arq==0.26.3",
   "asyncpg==0.30.0",
+  "stream-zip>=0.0.83",
 ]
 
 [project.optional-dependencies]

@@ -1,5 +1,6 @@
 """Azure Blob Storage backend."""
 
+from collections.abc import AsyncIterable
 from datetime import UTC, datetime, timedelta
 from typing import IO
 
@@ -55,7 +56,7 @@ class AzureBlobBackend(StorageBackend):
     async def upload_and_sign(
         self,
         name: str,
-        data: bytes | IO[bytes],
+        data: bytes | IO[bytes] | AsyncIterable[bytes],
         *,
         ttl: timedelta = timedelta(hours=1),
         overwrite: bool = True,

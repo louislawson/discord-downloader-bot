@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterable
 from datetime import timedelta
 from typing import IO
 
@@ -22,7 +23,7 @@ class StorageBackend(ABC):
     async def upload_and_sign(
         self,
         name: str,
-        data: bytes | IO[bytes],
+        data: bytes | IO[bytes] | AsyncIterable[bytes],
         *,
         ttl: timedelta = timedelta(hours=1),
         overwrite: bool = True,
