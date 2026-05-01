@@ -4,7 +4,7 @@ from collections.abc import AsyncIterable
 from datetime import UTC, datetime, timedelta
 from typing import IO
 
-from azure.core.exceptions import AzureError
+from azure.core.exceptions import AzureError, ResourceNotFoundError
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
@@ -121,3 +121,21 @@ class AzureBlobBackend(StorageBackend):
         ):
             url = url.replace(settings.AZURE_INT_URL, settings.AZURE_EXT_URL)
         return url
+
+    async def delete_blob(self, name: str) -> None:
+        """Delete blob ``name`` from the container. Missing blobs are success.
+
+        Raises:
+            UploadError: any non-not-found ``AzureError``. Caller treats this
+                as best-effort cleanup; a failure here should not abort the
+                request flow.
+        """
+        try:
+            await self.con_client.delete_blob(name)
+        except ResourceNotFoundError:
+            return
+        except AzureError as e:
+            raise UploadError(
+                f"Failed to delete blob '{name}' from container "
+                f"'{self.con_client.container_name}': {e}"
+            ) from e

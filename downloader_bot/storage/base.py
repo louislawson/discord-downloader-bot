@@ -35,3 +35,12 @@ class StorageBackend(ABC):
             SignedUrlError: upload succeeded but URL signing failed.
             StorageConfigError: backend is misconfigured (non-recoverable).
         """
+
+    @abstractmethod
+    async def delete_blob(self, name: str) -> None:
+        """Delete the blob at ``name``.
+
+        Implementations must treat a missing blob as success (no-op). Other
+        backend errors should re-raise as ``UploadError`` so callers can
+        handle them without depending on a specific SDK.
+        """

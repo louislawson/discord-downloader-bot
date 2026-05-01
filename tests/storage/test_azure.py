@@ -2,14 +2,14 @@
 
 The backend takes an injected ``ContainerClient`` for testability, so these
 tests never touch the real Azure SDK or Azurite. They verify the public
-``StorageBackend`` contract (``upload_and_sign`` + async-CM dunders) rather
-than internal helpers.
+``StorageBackend`` contract (``upload_and_sign`` + ``delete_blob`` +
+async-CM dunders) rather than internal helpers.
 """
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from azure.core.exceptions import AzureError
+from azure.core.exceptions import AzureError, ResourceNotFoundError
 
 from downloader_bot.config import settings
 from downloader_bot.storage.azure import AzureBlobBackend
@@ -105,3 +105,30 @@ class TestAsyncContextManager:
                 raise RuntimeError("boom")
 
         mock_azure_client.close.assert_awaited_once()
+
+
+class TestDeleteBlob:
+    async def test_delete_blob_calls_container_delete_blob(self, mock_azure_client):
+        backend = AzureBlobBackend(client=mock_azure_client)
+
+        await backend.delete_blob("x.zip")
+
+        mock_azure_client.delete_blob.assert_awaited_once_with("x.zip")
+
+    async def test_delete_blob_swallows_resource_not_found(self, mock_azure_client):
+        mock_azure_client.delete_blob = AsyncMock(
+            side_effect=ResourceNotFoundError("missing")
+        )
+        backend = AzureBlobBackend(client=mock_azure_client)
+
+        # Should not raise — a missing blob is success for cleanup callers.
+        await backend.delete_blob("x.zip")
+
+    async def test_delete_blob_reraises_other_azure_errors_as_upload_error(
+        self, mock_azure_client
+    ):
+        mock_azure_client.delete_blob = AsyncMock(side_effect=AzureError("boom"))
+        backend = AzureBlobBackend(client=mock_azure_client)
+
+        with pytest.raises(UploadError, match="Failed to delete blob"):
+            await backend.delete_blob("x.zip")
