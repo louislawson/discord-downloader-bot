@@ -3,15 +3,21 @@
 Run with ``arq downloader_bot.worker.main.WorkerSettings`` from the project root. The worker
 connects to Redis using the same ``REDIS_URL`` the bot uses to enqueue jobs.
 
-``on_startup`` opens a single REST-only Discord client and a Postgres pool and
-stashes them on the ARQ context as ``ctx['discord_client']`` and
-``ctx['db_pool']`` so every job reuses the same logged-in HTTP session and
-database connections. ``on_shutdown`` closes them on the way out.
+``on_startup`` opens a single REST-only Discord client, a Postgres pool, and a
+shared ``aiohttp.ClientSession`` for streaming attachment downloads from
+Discord's CDN, then stashes them on the ARQ context as ``ctx['discord_client']``,
+``ctx['db_pool']``, and ``ctx['http']`` so every job reuses them.
+``on_shutdown`` closes them on the way out.
+
+The ``aiohttp.ClientSession`` is owned by the worker rather than reusing
+discord.py's internal session — that one is configured for Discord API
+calls (token auth, rate limits) and is the wrong shape for raw CDN GETs.
 """
 
 import logging
 from typing import Any, ClassVar
 
+import aiohttp
 import discord
 
 from downloader_bot.config import settings
@@ -57,15 +63,21 @@ async def on_startup(ctx: dict) -> None:
     """
     Worker lifecycle hook — runs once when the worker process starts.
 
-    Opens a REST-only Discord client (no gateway) and a Postgres pool, both
-    shared by every job in this worker, stored as ``ctx['discord_client']``
-    and ``ctx['db_pool']``.
+    Opens a REST-only Discord client (no gateway), a Postgres pool, and an
+    aiohttp ``ClientSession`` for CDN downloads — all shared by every job in
+    this worker and stored as ``ctx['discord_client']``, ``ctx['db_pool']``,
+    and ``ctx['http']``.
     """
     logger.info("Worker starting up (REDIS_URL=%s)", settings.REDIS_URL)
     ctx["discord_client"] = await open_client(settings.TOKEN)
     logger.info("REST-only Discord client logged in")
     ctx["db_pool"] = await open_db_pool()
     logger.info("Connected to Postgres")
+    ctx["http"] = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=1800, sock_read=60),
+        connector=aiohttp.TCPConnector(limit=20, limit_per_host=10),
+    )
+    logger.info("Opened aiohttp ClientSession for CDN downloads")
 
 
 async def on_shutdown(ctx: dict) -> None:
@@ -78,6 +90,10 @@ async def on_shutdown(ctx: dict) -> None:
     if db_pool is not None:
         await db_pool.close()
         logger.info("Postgres pool closed")
+    http: aiohttp.ClientSession | None = ctx.get("http")
+    if http is not None:
+        await http.close()
+        logger.info("aiohttp ClientSession closed")
     logger.info("Worker shutting down")
 
 
