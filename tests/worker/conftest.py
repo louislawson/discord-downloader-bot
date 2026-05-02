@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import discord
 import pytest
 
@@ -56,12 +57,19 @@ def mock_discord_client():
 
 
 @pytest.fixture
-def arq_ctx(mock_discord_client, mock_db_pool, mock_redis):
+def mock_aiohttp_session():
+    """Mock ``aiohttp.ClientSession`` for the streaming download pipeline."""
+    return AsyncMock(spec=aiohttp.ClientSession)
+
+
+@pytest.fixture
+def arq_ctx(mock_discord_client, mock_db_pool, mock_redis, mock_aiohttp_session):
     """ARQ context dict shaped to match what ``on_startup`` populates."""
     return {
         "discord_client": mock_discord_client,
         "db_pool": mock_db_pool,
         "redis": mock_redis,
+        "http": mock_aiohttp_session,
         "job_id": "job-abc",
         "job_try": 1,
     }

@@ -1,18 +1,18 @@
 """Background jobs for the downloader bot worker.
 
 Jobs receive an ARQ ``ctx`` dict (with ``job_id``, ``redis``, plus whatever
-``on_startup`` populated — namely ``discord_client``) and a job-specific
-payload dict.
+``on_startup`` populated — namely ``discord_client``, ``db_pool``, and
+``http``) and a job-specific payload dict.
 """
 
 import logging
 from datetime import datetime
-from io import BytesIO
-from zipfile import ZIP_DEFLATED, ZipFile
 
+import aiohttp
 import discord
 from arq.worker import Retry, RetryJob
 
+from downloader_bot.config import settings
 from downloader_bot.storage import get_storage_backend
 from downloader_bot.storage.exceptions import (
     SignedUrlError,
@@ -20,48 +20,12 @@ from downloader_bot.storage.exceptions import (
     UploadError,
 )
 from downloader_bot.worker.delivery import DeliveryPayload, deliver
+from downloader_bot.worker.zip_stream import (
+    AttachmentStreamError,
+    build_zip_stream,
+)
 
 logger = logging.getLogger("downloader_bot.worker.jobs")
-
-
-def _guild_upload_limit(guild: discord.Guild | None) -> int:
-    """
-    Return the file upload limit in bytes for ``guild``.
-
-    Same boost-tier table the bot used to consult; duplicated here so the
-    worker is self-contained.
-    """
-    if guild is None:
-        return 8 * 1024 * 1024  # DMs / unknown guild
-    tier = guild.premium_tier
-    if tier >= 3:
-        return 100 * 1024 * 1024
-    if tier == 2:
-        return 50 * 1024 * 1024
-    return 8 * 1024 * 1024
-
-
-async def _resolve_guild(
-    client: discord.Client,
-    guild_id: int | None,
-) -> discord.Guild | None:
-    """
-    Fetch a real ``Guild`` over REST so ``premium_tier`` is populated.
-
-    ``client.fetch_channel(...)`` in REST-only mode returns a channel whose
-    ``.guild`` is a placeholder ``Object`` (no tier info). We need a real
-    Guild to compute the upload-fallback limit.
-    """
-    if guild_id is None:
-        return None
-    try:
-        return await client.fetch_guild(guild_id)
-    except discord.HTTPException:
-        logger.warning(
-            "Could not fetch guild %s — defaulting to tier 0 upload limit",
-            guild_id,
-        )
-        return None
 
 
 def _success_embed(
@@ -74,28 +38,6 @@ def _success_embed(
         title="Channel Media Download",
         description=f"[Download channel media]({sas_url})",
         colour=discord.Color.green(),
-        timestamp=datetime.now(),
-    )
-    embed.set_author(name="Downloader Bot")
-    embed.add_field(name="Images", value=str(image_count), inline=True)
-    embed.add_field(name="Videos", value=str(video_count), inline=True)
-    embed.set_footer(text=f"Requested by {requester_tag}")
-    return embed
-
-
-def _attachment_fallback_embed(
-    image_count: int,
-    video_count: int,
-    requester_tag: str,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title="Channel Media Download (direct attachment)",
-        description=(
-            "Cloud storage was unavailable, so the archive is attached "
-            "directly. Note: this file will expire when Discord removes "
-            "the attachment."
-        ),
-        colour=discord.Color.orange(),
         timestamp=datetime.now(),
     )
     embed.set_author(name="Downloader Bot")
@@ -142,10 +84,10 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     future code path uses it.
 
     Anticipated errors (Forbidden history walks, missing storage config,
-    upload failures with attachment fallback, etc.) are handled inside the
-    body and produce their own targeted embeds — this wrapper only fires
-    for everything else (network blips, transient Discord 5xx, unexpected
-    SDK errors).
+    upload failures, mid-stream attachment failures, etc.) are handled
+    inside the body and produce their own targeted embeds — this wrapper
+    only fires for everything else (network blips, transient Discord 5xx,
+    unexpected SDK errors).
     """
     job_id: str = ctx["job_id"]
     try:
@@ -177,22 +119,26 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
 
 async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     """
-    Bundle a channel's allowed-MIME attachments into a zip, upload via the
-    configured storage backend, and deliver the pre-signed link (or fallback
-    attachment) via DM/channel.
+    Stream a channel's allowed-MIME attachments into a zip, upload the
+    stream to the configured storage backend, and deliver the pre-signed
+    link via DM/channel.
 
-    The four phases match the original cog: collect → validate → upload →
-    deliver. ``deliver`` handles DM/channel routing and idempotency.
+    Memory is bounded: the pipeline composes ``channel.history()`` →
+    aiohttp chunked GET → ``stream-zip`` async generator →
+    ``ContainerClient.upload_blob`` so no stage materialises the full
+    archive. ``deliver`` handles DM/channel routing and idempotency.
 
     Args:
-        ctx (dict): ARQ context. Reads ``discord_client`` and ``db_pool``
-            (both added by ``on_startup``), ``redis``, and ``job_id``.
+        ctx (dict): ARQ context. Reads ``discord_client``, ``db_pool``, and
+            ``http`` (all added by ``on_startup``), plus ``redis`` and
+            ``job_id``.
         payload (dict): Job payload (see ``cogs/download.py`` for shape).
 
     Returns:
         dict: ``{"ok": bool, ...}`` summary stored by ARQ.
     """
     discord_client: discord.Client = ctx["discord_client"]
+    http_session: aiohttp.ClientSession = ctx["http"]
     redis_pool = ctx["redis"]
     db_pool = ctx["db_pool"]
     job_id: str = ctx["job_id"]
@@ -215,130 +161,165 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
 
     channel = await discord_client.fetch_channel(channel_id)
 
-    image_count = 0
-    video_count = 0
-
-    # --- Phase A: collect and zip -------------------------------------------
-    zip_buffer = BytesIO()
-    try:
-        with ZipFile(zip_buffer, mode="w", compression=ZIP_DEFLATED) as zip_file:
-            async for message in channel.history(limit=None):
-                for attachment in message.attachments:
-                    if attachment.content_type not in allowed_types:
-                        continue
-
-                    if "image" in attachment.content_type:
-                        image_count += 1
-                    if "video" in attachment.content_type:
-                        video_count += 1
-
-                    att_buffer = BytesIO()
-                    try:
-                        await attachment.save(att_buffer)
-                    except discord.HTTPException as e:
-                        logger.warning(
-                            "Skipped attachment '%s' (msg %s): %s",
-                            attachment.filename,
-                            message.id,
-                            e,
-                        )
-                        att_buffer.close()
-                        continue
-
-                    zip_file.writestr(
-                        f"{message.id}_{attachment.filename}",
-                        att_buffer.getvalue(),
-                    )
-                    att_buffer.close()
-    except discord.Forbidden:
-        logger.warning(
-            "Job %s: missing permission to read history of channel %s",
-            job_id,
-            channel_id,
-        )
-        await deliver(
-            discord_client,
-            redis_pool,
-            db_pool,
-            job_id,
-            requester_id,
-            guild_id,
-            only_me,
-            DeliveryPayload(
-                embed=_error_embed(
-                    "Missing permissions",
-                    "I don't have permission to read the history of that channel.",
-                )
-            ),
-        )
-        zip_buffer.close()
-        return {"ok": False, "reason": "forbidden"}
-    except discord.HTTPException as e:
-        logger.exception(
-            "Job %s: discord error during history walk: %s",
-            job_id,
-            e,
-        )
-        await deliver(
-            discord_client,
-            redis_pool,
-            db_pool,
-            job_id,
-            requester_id,
-            guild_id,
-            only_me,
-            DeliveryPayload(
-                embed=_error_embed(
-                    "Discord error",
-                    "An unexpected Discord error occurred while reading the "
-                    "channel's history. Please try again later.",
-                )
-            ),
-        )
-        zip_buffer.close()
-        return {"ok": False, "reason": "discord_http"}
-
-    # --- Phase B: nothing to zip --------------------------------------------
-    if image_count == 0 and video_count == 0:
-        logger.info(
-            "Job %s: no allowed media found in channel %s",
-            job_id,
-            channel_id,
-        )
-        await deliver(
-            discord_client,
-            redis_pool,
-            db_pool,
-            job_id,
-            requester_id,
-            guild_id,
-            only_me,
-            DeliveryPayload(
-                embed=_error_embed(
-                    "No media found",
-                    "No allowed media types were found in that channel.",
-                )
-            ),
-        )
-        zip_buffer.close()
-        return {"ok": False, "reason": "empty"}
-
-    zip_buffer.seek(0)
+    # --- Phase A: build the streaming pipeline (no I/O yet) -----------------
+    stream = build_zip_stream(
+        http_session, channel, allowed_types, settings.ATTACHMENT_CHUNK_SIZE
+    )
     zip_filename = f"{getattr(channel, 'name', 'channel')}-media.zip"
-    zip_size = zip_buffer.getbuffer().nbytes
 
-    # --- Phase C: upload to storage -----------------------------------------
-    guild = await _resolve_guild(discord_client, guild_id)
-    upload_limit = _guild_upload_limit(guild)
-
+    # --- Phases B+C+D inside a single storage context -----------------------
+    # The storage context wraps upload, empty-channel cleanup, and signed-URL
+    # delivery so we never reopen the backend for the orphan-blob delete.
     try:
         async with get_storage_backend() as storage:
-            signed_url = await storage.upload_and_sign(
-                name=zip_filename,
-                data=zip_buffer,
-                overwrite=True,
+            try:
+                signed_url = await storage.upload_and_sign(
+                    name=zip_filename,
+                    data=stream.iterable,
+                    overwrite=True,
+                )
+            except discord.Forbidden:
+                # Raised lazily from inside channel.history() once stream-zip
+                # starts pulling members.
+                logger.warning(
+                    "Job %s: missing permission to read history of channel %s",
+                    job_id,
+                    channel_id,
+                )
+                await deliver(
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
+                    DeliveryPayload(
+                        embed=_error_embed(
+                            "Missing permissions",
+                            "I don't have permission to read the history "
+                            "of that channel.",
+                        )
+                    ),
+                )
+                return {"ok": False, "reason": "forbidden"}
+            except discord.HTTPException:
+                logger.exception("Job %s: discord error during history walk", job_id)
+                await deliver(
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
+                    DeliveryPayload(
+                        embed=_error_embed(
+                            "Discord error",
+                            "An unexpected Discord error occurred while "
+                            "reading the channel's history. Please try "
+                            "again later.",
+                        )
+                    ),
+                )
+                return {"ok": False, "reason": "discord_http"}
+            except AttachmentStreamError:
+                logger.exception("Job %s: attachment stream failed mid-flight", job_id)
+                await deliver(
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
+                    DeliveryPayload(
+                        embed=_error_embed(
+                            "Discord error",
+                            "An attachment failed to download partway "
+                            "through. Please try again later.",
+                        )
+                    ),
+                )
+                return {"ok": False, "reason": "attachment_stream"}
+            except (UploadError, SignedUrlError):
+                logger.exception("Job %s: storage backend failed", job_id)
+                await deliver(
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
+                    DeliveryPayload(
+                        embed=_error_embed(
+                            "Upload failed",
+                            "The media archive could not be uploaded to "
+                            "storage. Please try again later or contact an "
+                            "administrator.",
+                        )
+                    ),
+                )
+                return {"ok": False, "reason": "upload_failed"}
+
+            # --- Empty-channel cleanup (reuses the same storage context) ---
+            if stream.counters.images == 0 and stream.counters.videos == 0:
+                # Best-effort delete of the orphan empty zip; swallow errors
+                # and let Azure's 7-day lifecycle policy reap leftovers.
+                try:
+                    await storage.delete_blob(zip_filename)
+                except Exception:
+                    logger.warning(
+                        "Job %s: best-effort delete of empty zip '%s' failed; "
+                        "relying on lifecycle policy",
+                        job_id,
+                        zip_filename,
+                    )
+                logger.info(
+                    "Job %s: no allowed media found in channel %s",
+                    job_id,
+                    channel_id,
+                )
+                await deliver(
+                    discord_client,
+                    redis_pool,
+                    db_pool,
+                    job_id,
+                    requester_id,
+                    guild_id,
+                    only_me,
+                    DeliveryPayload(
+                        embed=_error_embed(
+                            "No media found",
+                            "No allowed media types were found in that channel.",
+                        )
+                    ),
+                )
+                return {"ok": False, "reason": "empty"}
+
+            # --- Phase D: deliver SAS URL --------------------------------
+            await deliver(
+                discord_client,
+                redis_pool,
+                db_pool,
+                job_id,
+                requester_id,
+                guild_id,
+                only_me,
+                DeliveryPayload(
+                    embed=_success_embed(
+                        signed_url,
+                        stream.counters.images,
+                        stream.counters.videos,
+                        requester_tag,
+                    )
+                ),
             )
+            return {"ok": True, "sas_url": signed_url}
     except StorageConfigError:
+        # Raised by get_storage_backend() itself before the context opens —
+        # belongs outside the inner try/except.
         logger.exception("Job %s: storage misconfigured", job_id)
         await deliver(
             discord_client,
@@ -356,79 +337,4 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                 )
             ),
         )
-        zip_buffer.close()
         return {"ok": False, "reason": "config"}
-
-    except (UploadError, SignedUrlError) as e:
-        logger.exception(
-            "Job %s: storage backend failed (%s) — attempting attachment fallback",
-            job_id,
-            type(e).__name__,
-        )
-        if zip_size <= upload_limit:
-            try:
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=_attachment_fallback_embed(
-                            image_count,
-                            video_count,
-                            requester_tag,
-                        ),
-                        attachment=(zip_buffer, zip_filename),
-                    ),
-                )
-                return {"ok": True, "fallback": "attachment"}
-            finally:
-                zip_buffer.close()
-        else:
-            await deliver(
-                discord_client,
-                redis_pool,
-                db_pool,
-                job_id,
-                requester_id,
-                guild_id,
-                only_me,
-                DeliveryPayload(
-                    embed=_error_embed(
-                        "Upload failed",
-                        "The media archive could not be uploaded to storage, and "
-                        f"it is too large ({zip_size // (1024 * 1024)} MB) to "
-                        "send as a Discord attachment. Please try again later or "
-                        "contact an administrator.",
-                    )
-                ),
-            )
-            zip_buffer.close()
-            return {"ok": False, "reason": "upload_failed_too_large"}
-
-    # --- Phase D: deliver the SAS link --------------------------------------
-    try:
-        await deliver(
-            discord_client,
-            redis_pool,
-            db_pool,
-            job_id,
-            requester_id,
-            guild_id,
-            only_me,
-            DeliveryPayload(
-                embed=_success_embed(
-                    signed_url,
-                    image_count,
-                    video_count,
-                    requester_tag,
-                )
-            ),
-        )
-        return {"ok": True, "sas_url": signed_url}
-    finally:
-        if not zip_buffer.closed:
-            zip_buffer.close()

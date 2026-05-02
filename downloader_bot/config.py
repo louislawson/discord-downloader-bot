@@ -41,5 +41,10 @@ class Settings(BaseSettings):
     # Postgres (per-guild settings)
     POSTGRES_DSN: str
 
+    # Streaming-zip pipeline — chunk size for the per-attachment HTTP read
+    # passed to aiohttp's iter_chunked. Doubles as the upper bound on per-job
+    # in-flight bytes from the CDN.
+    ATTACHMENT_CHUNK_SIZE: int = 64 * 1024
+
 
 settings = Settings()
