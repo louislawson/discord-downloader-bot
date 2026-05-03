@@ -6,13 +6,13 @@ Jobs receive an ARQ ``ctx`` dict (with ``job_id``, ``redis``, plus whatever
 """
 
 import logging
-from datetime import datetime
 
 import aiohttp
 import discord
 from arq.worker import Retry, RetryJob
 
 from downloader_bot.config import settings
+from downloader_bot.embeds import error, media_download
 from downloader_bot.storage import get_storage_backend
 from downloader_bot.storage.exceptions import (
     SignedUrlError,
@@ -26,47 +26,6 @@ from downloader_bot.worker.zip_stream import (
 )
 
 logger = logging.getLogger("downloader_bot.worker.jobs")
-
-
-def _success_embed(
-    sas_url: str,
-    image_count: int,
-    video_count: int,
-    requester_tag: str,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title="Channel Media Download",
-        description=f"[Download channel media]({sas_url})",
-        colour=discord.Color.green(),
-        timestamp=datetime.now(),
-    )
-    embed.set_author(name="Downloader Bot")
-    embed.add_field(name="Images", value=str(image_count), inline=True)
-    embed.add_field(name="Videos", value=str(video_count), inline=True)
-    embed.set_footer(text=f"Requested by {requester_tag}")
-    return embed
-
-
-def _error_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(
-        title=title,
-        description=description,
-        colour=discord.Color.red(),
-        timestamp=datetime.now(),
-    )
-
-
-def _unhandled_failure_embed() -> discord.Embed:
-    """Generic last-resort embed used when the job dies on an unhandled error."""
-    return discord.Embed(
-        title="Download failed",
-        description=(
-            "The download job failed unexpectedly. Please try again later, "
-            "or contact an administrator if this keeps happening."
-        ),
-        colour=discord.Color.red(),
-        timestamp=datetime.now(),
-    )
 
 
 async def download_channel_media(ctx: dict, payload: dict) -> dict:
@@ -107,7 +66,15 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
                 payload["requester_id"],
                 payload.get("guild_id"),
                 payload.get("only_me", False),
-                DeliveryPayload(embed=_unhandled_failure_embed()),
+                DeliveryPayload(
+                    embed=error(
+                        title="Download failed",
+                        description=(
+                            "The download job failed unexpectedly. Please try again later, "
+                            "or contact an administrator if this keeps happening."
+                        ),
+                    )
+                ),
             )
         except Exception:
             logger.exception(
@@ -195,10 +162,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     guild_id,
                     only_me,
                     DeliveryPayload(
-                        embed=_error_embed(
-                            "Missing permissions",
-                            "I don't have permission to read the history "
-                            "of that channel.",
+                        embed=error(
+                            title="Missing permissions",
+                            description="I don't have permission to read the history of that channel.",
                         )
                     ),
                 )
@@ -214,11 +180,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     guild_id,
                     only_me,
                     DeliveryPayload(
-                        embed=_error_embed(
-                            "Discord error",
-                            "An unexpected Discord error occurred while "
-                            "reading the channel's history. Please try "
-                            "again later.",
+                        embed=error(
+                            title="Discord error",
+                            description="An unexpected Discord error occurred while reading the channel's history. Please try again later.",
                         )
                     ),
                 )
@@ -234,10 +198,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     guild_id,
                     only_me,
                     DeliveryPayload(
-                        embed=_error_embed(
-                            "Discord error",
-                            "An attachment failed to download partway "
-                            "through. Please try again later.",
+                        embed=error(
+                            title="Discord error",
+                            description="An attachment failed to download partway through. Please try again later.",
                         )
                     ),
                 )
@@ -253,11 +216,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     guild_id,
                     only_me,
                     DeliveryPayload(
-                        embed=_error_embed(
-                            "Upload failed",
-                            "The media archive could not be uploaded to "
-                            "storage. Please try again later or contact an "
-                            "administrator.",
+                        embed=error(
+                            title="Upload failed",
+                            description="The media archive could not be uploaded to storage. Please try again later or contact an administrator.",
                         )
                     ),
                 )
@@ -290,9 +251,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     guild_id,
                     only_me,
                     DeliveryPayload(
-                        embed=_error_embed(
-                            "No media found",
-                            "No allowed media types were found in that channel.",
+                        embed=error(
+                            title="No media found",
+                            description="No allowed media types were found in that channel.",
                         )
                     ),
                 )
@@ -308,11 +269,11 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                 guild_id,
                 only_me,
                 DeliveryPayload(
-                    embed=_success_embed(
-                        signed_url,
-                        stream.counters.images,
-                        stream.counters.videos,
-                        requester_tag,
+                    embed=media_download(
+                        signed_url=signed_url,
+                        image_count=stream.counters.images,
+                        video_count=stream.counters.videos,
+                        requester=requester_tag,
                     )
                 ),
             )
@@ -330,10 +291,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
             guild_id,
             only_me,
             DeliveryPayload(
-                embed=_error_embed(
-                    "Storage misconfigured",
-                    "The bot's storage backend is not configured correctly. "
-                    "Please contact an administrator.",
+                embed=error(
+                    title="Storage misconfigured",
+                    description="The bot's storage backend is not configured correctly. Please contact an administrator.",
                 )
             ),
         )

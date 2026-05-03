@@ -4,6 +4,8 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 
+from downloader_bot.embeds import info
+
 
 class General(commands.Cog, name="general"):
     """
@@ -27,7 +29,8 @@ class General(commands.Cog, name="general"):
         Args:
             context (Context): The command context.
         """
-        embed = discord.Embed(
+        embed = info(
+            title="Bot Invite",
             description=f"Invite me by clicking [here]({self.bot.invite_link}).",
         )
         try:

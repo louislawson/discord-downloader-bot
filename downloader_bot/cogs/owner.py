@@ -1,9 +1,10 @@
 """Owner commands cog."""
 
-import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
+
+from downloader_bot.embeds import error, info, success
 
 _VALID_SCOPES = ("global", "guild")
 
@@ -43,9 +44,9 @@ class Owner(commands.Cog, name="owner"):
                 context.author.id,
                 scope,
             )
-            embed = discord.Embed(
+            embed = error(
+                title="Command error",
                 description=f"Unknown scope `{scope}`. Must be one of: `global`, `guild`.",
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
             return
@@ -57,17 +58,17 @@ class Owner(commands.Cog, name="owner"):
                 context.author,
                 context.author.id,
             )
-            embed = discord.Embed(
+            embed = info(
+                title="Command sync",
                 description="Slash commands have been globally synchronized.",
-                color=0xBEBEFE,
             )
             await context.send(embed=embed)
 
         elif scope == "guild":
             if context.guild is None:
-                embed = discord.Embed(
+                embed = error(
+                    title="Command error",
                     description="Guild sync can only be run inside a server, not in DMs.",
-                    color=0xE02B2B,
                 )
                 await context.send(embed=embed)
                 return
@@ -81,9 +82,9 @@ class Owner(commands.Cog, name="owner"):
                 context.author,
                 context.author.id,
             )
-            embed = discord.Embed(
+            embed = info(
+                title="Command sync",
                 description="Slash commands have been synchronized in this guild.",
-                color=0xBEBEFE,
             )
             await context.send(embed=embed)
 
@@ -100,9 +101,9 @@ class Owner(commands.Cog, name="owner"):
             context (Context): The command context.
         """
         if self.bot.arq_pool is None:
-            embed = discord.Embed(
+            embed = error(
+                title="Queue error",
                 description="Queue is not connected — Redis pool is unavailable.",
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
             return
@@ -115,12 +116,9 @@ class Owner(commands.Cog, name="owner"):
                 "channel_id": context.channel.id,
             },
         )
-        embed = discord.Embed(
-            description=(
-                f"Enqueued `noop_job` (job_id `{job.job_id}`). "
-                "Check the worker logs to confirm it ran."
-            ),
-            color=0xBEBEFE,
+        embed = success(
+            title="Queue successful",
+            description=f"Enqueued `noop_job` (job_id `{job.job_id}`). Check the worker logs to confirm it ran.",
         )
         await context.send(embed=embed)
 

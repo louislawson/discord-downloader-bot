@@ -14,6 +14,7 @@ from discord.ext.commands import Context, errors
 
 from downloader_bot.config import settings
 from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
+from downloader_bot.embeds import error
 from downloader_bot.presence import STATUSES, cycle_random
 from downloader_bot.queue_client import open_pool
 
@@ -201,7 +202,7 @@ class DiscordBot(commands.Bot):
     async def on_command_error(
         self,
         context: Context,
-        error: errors.CommandError,
+        cmd_error: errors.CommandError,
     ) -> None:
         """
         Global command error handler. Sends a user-facing embed for known error
@@ -209,10 +210,10 @@ class DiscordBot(commands.Bot):
 
         Args:
             context (Context): The context of the command.
-            error (CommandError): The error that was raised.
+            cmd_error (CommandError): The error that was raised.
         """
-        if isinstance(error, commands.CommandOnCooldown):
-            minutes, seconds = divmod(error.retry_after, 60)
+        if isinstance(cmd_error, commands.CommandOnCooldown):
+            minutes, seconds = divmod(cmd_error.retry_after, 60)
             hours, minutes = divmod(minutes, 60)
             hours = hours % 24
             parts = []
@@ -222,16 +223,16 @@ class DiscordBot(commands.Bot):
                 parts.append(f"{round(minutes)} minutes")
             if round(seconds) > 0:
                 parts.append(f"{round(seconds)} seconds")
-            embed = discord.Embed(
+            embed = error(
+                title="Error",
                 description=f"**Please slow down** — you can use this command again in {', '.join(parts)}.",
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.NotOwner):
-            embed = discord.Embed(
+        elif isinstance(cmd_error, commands.NotOwner):
+            embed = error(
+                title="Error",
                 description="You are not the owner of the bot!",
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
             if context.guild:
@@ -249,61 +250,59 @@ class DiscordBot(commands.Bot):
                     context.author.id,
                 )
 
-        elif isinstance(error, commands.MissingPermissions):
-            embed = discord.Embed(
+        elif isinstance(cmd_error, commands.MissingPermissions):
+            embed = error(
+                title="Error",
                 description=(
                     "You are missing the permission(s) `"
-                    + ", ".join(error.missing_permissions)
+                    + ", ".join(cmd_error.missing_permissions)
                     + "` to execute this command!"
                 ),
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.BotMissingPermissions):
+        elif isinstance(cmd_error, commands.BotMissingPermissions):
             self.logger.warning(
                 "Bot is missing permissions %s to run '%s' in channel '%s'.",
-                error.missing_permissions,
+                cmd_error.missing_permissions,
                 context.command,
                 context.channel,
             )
-            embed = discord.Embed(
+            embed = error(
+                title="Error",
                 description=(
                     "I am missing the permission(s) `"
-                    + ", ".join(error.missing_permissions)
+                    + ", ".join(cmd_error.missing_permissions)
                     + "` to fully perform this command!"
                 ),
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.MissingRequiredArgument):
-            embed = discord.Embed(
+        elif isinstance(cmd_error, commands.MissingRequiredArgument):
+            embed = error(
                 title="Missing argument",
-                description=str(error).capitalize(),
-                color=0xE02B2B,
+                description=str(cmd_error).capitalize(),
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.BadArgument):
-            embed = discord.Embed(
+        elif isinstance(cmd_error, commands.BadArgument):
+            embed = error(
                 title="Invalid argument",
-                description=str(error).capitalize(),
-                color=0xE02B2B,
+                description=str(cmd_error).capitalize(),
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.MaxConcurrencyReached):
-            embed = discord.Embed(
+        elif isinstance(cmd_error, commands.MaxConcurrencyReached):
+            embed = error(
+                title="Error",
                 description=(
                     "This command is already running in this channel. "
                     "Please wait for it to finish before running it again."
                 ),
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
 
-        elif isinstance(error, commands.CommandNotFound):
+        elif isinstance(cmd_error, commands.CommandNotFound):
             # Silently ignore unknown commands — no need to log or respond.
             return
 
@@ -315,15 +314,14 @@ class DiscordBot(commands.Bot):
                 context.command,
                 context.author,
                 context.author.id,
-                error,
+                cmd_error,
             )
-            embed = discord.Embed(
+            embed = error(
                 title="Unexpected error",
                 description=(
                     "An unexpected error occurred while running this command. "
                     "Please try again later, or contact an administrator if this keeps happening."
                 ),
-                color=0xE02B2B,
             )
             await context.send(embed=embed)
 

@@ -9,7 +9,6 @@ Server-owner-only. Configures how completed download jobs are delivered:
 - ``show``    — print current settings
 """
 
-from datetime import datetime
 from typing import Literal
 
 import discord
@@ -18,6 +17,7 @@ from discord.ext import commands
 from discord.ext.commands import Context, errors
 
 from downloader_bot.db import guild_settings
+from downloader_bot.embeds import error, info, success
 
 
 class NotGuildOwner(commands.CheckFailure):
@@ -35,33 +35,6 @@ def _is_guild_owner():
         return True
 
     return commands.check(predicate)
-
-
-def _ok_embed(description: str) -> discord.Embed:
-    return discord.Embed(
-        title="Updated",
-        description=description,
-        colour=discord.Color.green(),
-        timestamp=datetime.now(),
-    )
-
-
-def _info_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(
-        title=title,
-        description=description,
-        colour=discord.Color.blurple(),
-        timestamp=datetime.now(),
-    )
-
-
-def _error_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(
-        title=title,
-        description=description,
-        colour=discord.Color.red(),
-        timestamp=datetime.now(),
-    )
 
 
 class Setup(commands.Cog, name="setup"):
@@ -82,10 +55,9 @@ class Setup(commands.Cog, name="setup"):
                 "Setup command invoked but db_pool is not initialised"
             )
             await context.send(
-                embed=_error_embed(
-                    "Service unavailable",
-                    "The configuration store is not currently available. "
-                    "Please try again in a moment.",
+                embed=error(
+                    title="Service unavailable",
+                    description="The configuration store is not currently available. Please try again in a moment.",
                 ),
                 ephemeral=True,
             )
@@ -102,10 +74,9 @@ class Setup(commands.Cog, name="setup"):
         """Show usage when invoked without a subcommand (prefix invocation only)."""
         if context.invoked_subcommand is None:
             await context.send(
-                embed=_info_embed(
-                    "Setup",
-                    f"Use `{self.bot.bot_prefix}setup mode | channel | "
-                    f"clear | show` (or the `/setup` slash command).",
+                embed=info(
+                    title="Setup",
+                    description=f"Use `{self.bot.bot_prefix}setup mode | channel | clear | show` (or the `/setup` slash command).",
                 ),
                 ephemeral=True,
             )
@@ -127,7 +98,10 @@ class Setup(commands.Cog, name="setup"):
             return
         await guild_settings.set_mode(self.bot.db_pool, context.guild.id, mode)
         await context.send(
-            embed=_ok_embed(f"Delivery mode set to `{mode}`."),
+            embed=success(
+                title="Updated",
+                description=f"Delivery mode set to `{mode}`.",
+            ),
             ephemeral=True,
         )
 
@@ -146,9 +120,9 @@ class Setup(commands.Cog, name="setup"):
             return
         if channel.guild.id != context.guild.id:
             await context.send(
-                embed=_error_embed(
-                    "Wrong server",
-                    "That channel doesn't belong to this server.",
+                embed=error(
+                    title="Wrong server",
+                    description="That channel doesn't belong to this server.",
                 ),
                 ephemeral=True,
             )
@@ -159,7 +133,10 @@ class Setup(commands.Cog, name="setup"):
             channel.id,
         )
         await context.send(
-            embed=_ok_embed(f"Results channel set to {channel.mention}."),
+            embed=success(
+                title="Updated",
+                description=f"Results channel set to {channel.mention}.",
+            ),
             ephemeral=True,
         )
 
@@ -173,7 +150,10 @@ class Setup(commands.Cog, name="setup"):
             return
         await guild_settings.clear_channel(self.bot.db_pool, context.guild.id)
         await context.send(
-            embed=_ok_embed("Results channel cleared."),
+            embed=success(
+                title="Updated",
+                description="Results channel cleared.",
+            ),
             ephemeral=True,
         )
 
@@ -191,9 +171,9 @@ class Setup(commands.Cog, name="setup"):
         )
         channel_str = f"<#{channel_id}>" if channel_id else "_not set_"
         await context.send(
-            embed=_info_embed(
-                "Delivery settings",
-                f"**Mode:** `{mode}`\n**Channel:** {channel_str}",
+            embed=info(
+                title="Delivery settings",
+                description=f"**Mode:** `{mode}`\n**Channel:** {channel_str}",
             ),
             ephemeral=True,
         )
@@ -201,7 +181,7 @@ class Setup(commands.Cog, name="setup"):
     async def cog_command_error(
         self,
         context: Context,
-        error: errors.CommandError,
+        cmd_error: errors.CommandError,
     ) -> None:
         """
         Handle setup-specific errors before the global handler sees them.
@@ -210,22 +190,25 @@ class Setup(commands.Cog, name="setup"):
         other errors re-raise so the global handler in [bot.py](bot.py)
         formats them.
         """
-        if isinstance(error, NotGuildOwner):
+        if isinstance(cmd_error, NotGuildOwner):
             await context.send(
-                embed=_error_embed("Server owner only", str(error)),
-                ephemeral=True,
-            )
-            return
-        if isinstance(error, commands.NoPrivateMessage):
-            await context.send(
-                embed=_error_embed(
-                    "Server only",
-                    "This command can only be used in a server.",
+                embed=error(
+                    title="Server owner only",
+                    description=str(cmd_error),
                 ),
                 ephemeral=True,
             )
             return
-        raise error
+        if isinstance(cmd_error, commands.NoPrivateMessage):
+            await context.send(
+                embed=error(
+                    title="Server only",
+                    description="This command can only be used in a server.",
+                ),
+                ephemeral=True,
+            )
+            return
+        raise cmd_error
 
 
 async def setup(bot) -> None:

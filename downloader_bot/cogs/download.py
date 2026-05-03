@@ -15,33 +15,22 @@ from discord.ext import commands
 from discord.ext.commands import Context
 
 from downloader_bot.config import settings
+from downloader_bot.embeds import error, info
 
 
 def _queued_embed(job_id: str, only_me: bool) -> discord.Embed:
     """Blurple ack shown immediately after enqueueing the job."""
-    description = (
-        "Your download has been queued. The result will be sent to you "
-        "via DM once it's ready."
-        if only_me
-        else "Your download has been queued. You'll be notified once it's ready."
-    )
-    embed = discord.Embed(
+    embed = info(
         title="Download queued",
-        description=description,
-        colour=discord.Color.blurple(),
-        timestamp=datetime.now(),
+        description=(
+            "Your download has been queued. The result will be sent to you "
+            "via DM once it's ready."
+            if only_me
+            else "Your download has been queued. You'll be notified once it's ready."
+        ),
     )
     embed.set_footer(text=f"Job {job_id}")
     return embed
-
-
-def _error_embed(title: str, description: str) -> discord.Embed:
-    return discord.Embed(
-        title=title,
-        description=description,
-        colour=discord.Color.red(),
-        timestamp=datetime.now(),
-    )
 
 
 class Download(commands.Cog, name="download"):
@@ -72,10 +61,9 @@ class Download(commands.Cog, name="download"):
         if self.bot.arq_pool is None:
             self.bot.logger.error("Download requested but ARQ pool is not initialised")
             await context.send(
-                embed=_error_embed(
-                    "Service unavailable",
-                    "The download queue is not currently available. "
-                    "Please try again in a moment.",
+                embed=error(
+                    title="Service unavailable",
+                    description="The download queue is not currently available. Please try again in a moment.",
                 ),
                 ephemeral=only_me,
             )
@@ -110,10 +98,9 @@ class Download(commands.Cog, name="download"):
                 e,
             )
             await context.send(
-                embed=_error_embed(
-                    "Service unavailable",
-                    "The download queue is not currently available. "
-                    "Please try again in a moment.",
+                embed=error(
+                    title="Service unavailable",
+                    description="The download queue is not currently available. Please try again in a moment.",
                 ),
                 ephemeral=only_me,
             )

@@ -73,6 +73,64 @@ class TestKnownErrors:
         embed = mock_context.send.await_args.kwargs["embed"]
         assert "slow down" in embed.description.lower()
 
+    async def test_not_owner_sends_embed_and_logs(self, bot, mock_context):
+        await bot.on_command_error(mock_context, commands.NotOwner("nope"))
+
+        mock_context.send.assert_awaited_once()
+        embed = mock_context.send.await_args.kwargs["embed"]
+        assert "owner" in embed.description.lower()
+        bot.logger.warning.assert_called_once()
+
+    async def test_bot_missing_permissions_lists_perms_and_logs(
+        self,
+        bot,
+        mock_context,
+    ):
+        # Shares the rename hazard with MissingPermissions: the handler reads
+        # ``cmd_error.missing_permissions`` both for the log line and for the
+        # embed body.
+        error = commands.BotMissingPermissions(missing_permissions=["send_messages"])
+
+        await bot.on_command_error(mock_context, error)
+
+        bot.logger.warning.assert_called_once()
+        embed = mock_context.send.await_args.kwargs["embed"]
+        assert "send_messages" in embed.description
+
+    async def test_missing_required_argument_uses_error_string(
+        self,
+        bot,
+        mock_context,
+    ):
+        # ``str(cmd_error).capitalize()`` flows through the description; if the
+        # rename ever drops here, we'd get the function's repr instead.
+        param = MagicMock(name="channel", displayed_name="channel")
+        error = commands.MissingRequiredArgument(param)
+
+        await bot.on_command_error(mock_context, error)
+
+        embed = mock_context.send.await_args.kwargs["embed"]
+        assert embed.title == "Missing argument"
+        assert str(error).capitalize() in embed.description
+
+    async def test_bad_argument_uses_error_string(self, bot, mock_context):
+        error = commands.BadArgument("converting to int failed")
+
+        await bot.on_command_error(mock_context, error)
+
+        embed = mock_context.send.await_args.kwargs["embed"]
+        assert embed.title == "Invalid argument"
+        assert "converting to int failed".capitalize() in embed.description
+
+    async def test_max_concurrency_reached_sends_embed(self, bot, mock_context):
+        bucket = MagicMock()
+        error = commands.MaxConcurrencyReached(number=1, per=bucket)
+
+        await bot.on_command_error(mock_context, error)
+
+        embed = mock_context.send.await_args.kwargs["embed"]
+        assert "already running" in embed.description.lower()
+
 
 class TestUnhandledError:
     async def test_falls_through_to_logged_unexpected_embed(self, bot, mock_context):
