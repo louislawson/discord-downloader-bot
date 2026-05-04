@@ -132,7 +132,7 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     stream = build_zip_stream(
         http_session, channel, allowed_types, settings.ATTACHMENT_CHUNK_SIZE
     )
-    zip_filename = f"{getattr(channel, 'name', 'channel')}-media.zip"
+    zip_filename = f"{getattr(channel, 'name', 'channel')}-{job_id}-media.zip"
 
     # --- Phases B+C+D inside a single storage context -----------------------
     # The storage context wraps upload, empty-channel cleanup, and signed-URL

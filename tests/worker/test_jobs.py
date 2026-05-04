@@ -174,7 +174,7 @@ class TestEmptyChannel:
         result = await download_channel_media(arq_ctx, _payload())
 
         assert result == {"ok": False, "reason": "empty"}
-        repo.delete_blob.assert_awaited_once_with("testchannel-media.zip")
+        repo.delete_blob.assert_awaited_once_with("testchannel-job-abc-media.zip")
         mock_deliver.assert_awaited_once()
         delivered = mock_deliver.await_args.args[-1]
         assert delivered.embed.title == "No media found"
