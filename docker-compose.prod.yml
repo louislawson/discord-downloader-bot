@@ -8,6 +8,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "discordhealthcheck" ]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   worker:
     image: louislawson/downloader-bot:2.0-arm64-v8
@@ -19,6 +25,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "arq", "--check", "downloader_bot.worker.main.WorkerSettings" ]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   redis:
     image: redis:7-alpine

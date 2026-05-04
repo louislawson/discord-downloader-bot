@@ -111,3 +111,7 @@ class WorkerSettings:
     # regardless of this value — see ``download_channel_media``'s wrapper
     # for how that's surfaced to the user.
     max_tries = 2
+    # Refresh the Redis health-check sentinel every 30 s (TTL = interval + 1)
+    # so the per-service ``arq --check`` HEALTHCHECK in docker-compose.prod.yml
+    # detects a dead worker within ~60-90 s. Default is 3600 s (1 h).
+    health_check_interval = 30

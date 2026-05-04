@@ -62,7 +62,7 @@ The production image:
 
 - Runs as a non-root `discordbot` user
 - Uses [Tini](https://github.com/krallin/tini) as PID 1 for proper signal handling and zombie reaping
-- Exposes a Docker `HEALTHCHECK` via [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) that verifies the gateway connection every 60s (bot only — the worker has no gateway to check)
+- Defines per-service Docker `HEALTHCHECK`s in [docker-compose.prod.yml](docker-compose.prod.yml) — the bot uses [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) to verify its gateway connection, and the worker uses `arq --check` to verify its Redis heartbeat sentinel is fresh
 
 For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point `AZURE_CONN_STR` at your real storage account.
 
