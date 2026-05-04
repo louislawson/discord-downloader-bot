@@ -102,7 +102,10 @@ async def _members(
     """
     async for message in channel.history(limit=None):
         for attachment in message.attachments:
-            if attachment.content_type not in allowed_types:
+            content_type = (
+                (attachment.content_type or "").split(";", 1)[0].strip().lower()
+            )
+            if content_type not in allowed_types:
                 continue
 
             try:
@@ -123,9 +126,9 @@ async def _members(
                 resp.release()
                 continue
 
-            if "image" in attachment.content_type:
+            if "image" in content_type:
                 counters.images += 1
-            elif "video" in attachment.content_type:
+            elif "video" in content_type:
                 counters.videos += 1
 
             yield (
