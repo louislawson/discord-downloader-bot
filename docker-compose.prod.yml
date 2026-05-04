@@ -1,6 +1,6 @@
 services:
   bot:
-    image: louislawson/downloader-bot:1.9-arm64-v8
+    image: louislawson/downloader-bot:2.0-arm64-v8
     env_file:
       - .env
     depends_on:
@@ -10,7 +10,7 @@ services:
         condition: service_healthy
 
   worker:
-    image: louislawson/downloader-bot:1.9-arm64-v8
+    image: louislawson/downloader-bot:2.0-arm64-v8
     env_file:
       - .env
     command: [ "arq", "downloader_bot.worker.main.WorkerSettings" ]
