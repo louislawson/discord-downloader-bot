@@ -35,8 +35,13 @@ import pytest
 
 @pytest.fixture
 def mock_redis():
-    """AsyncMock Redis client. ``.set`` returns True (claim succeeds) by default."""
+    """AsyncMock Redis client.
+
+    ``.get`` returns ``None`` (job not yet delivered) so the entry idempotency
+    check falls through. ``.set`` returns ``True`` for the post-success mark.
+    """
     redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
     redis.set = AsyncMock(return_value=True)
     return redis
 

@@ -46,18 +46,20 @@ def _make_file(attachment: tuple[BytesIO, str] | None) -> discord.File | None:
     return discord.File(buffer, filename=filename)
 
 
-async def _claim_delivery(redis_pool, job_id: str) -> bool:
-    """
-    Atomically claim the delivery slot for ``job_id``.
+async def _is_delivered(redis_pool, job_id: str) -> bool:
+    """Return ``True`` if ``job_id`` has already been marked delivered."""
+    return await redis_pool.get(f"delivered:{job_id}") is not None
 
-    Returns ``True`` exactly once per job_id within the TTL window. Subsequent
-    callers (e.g. ARQ retrying a job whose first run did deliver) get
-    ``False`` and must skip — that's the idempotency guarantee.
+
+async def _mark_delivered(redis_pool, job_id: str) -> None:
+    """Persist the ``delivered:{job_id}`` marker after a successful send.
+
+    Uses ``SET NX`` so a race between concurrent runs (which ARQ shouldn't
+    permit, but defence in depth) doesn't reset the TTL.
     """
-    claimed = await redis_pool.set(
+    await redis_pool.set(
         f"delivered:{job_id}", "1", ex=_DELIVERED_KEY_TTL_SECONDS, nx=True
     )
-    return bool(claimed)
 
 
 async def deliver(
@@ -86,7 +88,11 @@ async def deliver(
           If no channel is configured and DM was blocked, drop with a
           warning (DM was already attempted; no other route remains).
 
-    Idempotent: a Redis-backed claim ensures ARQ retries don't double-deliver.
+    Idempotent: a Redis-backed marker is written after the send returns
+    cleanly, so ARQ retries (or the outer wrapper's failure-embed fallback)
+    can re-attempt only when the original send actually raised. Forbidden
+    DMs / channel-post failures count as a completed attempt and are
+    marked delivered — a retry won't change a permission denial.
 
     Args:
         discord_client (discord.Client): REST-only client.
@@ -98,10 +104,36 @@ async def deliver(
         only_me (bool): Whether the result must stay private.
         payload (DeliveryPayload): The embed and optional attachment.
     """
-    if not await _claim_delivery(redis_pool, job_id):
-        logger.info("Delivery for job %s already claimed — skipping", job_id)
+    if await _is_delivered(redis_pool, job_id):
+        logger.info("Delivery for job %s already completed — skipping", job_id)
         return
 
+    await _route(
+        discord_client,
+        db_pool,
+        job_id,
+        requester_id,
+        guild_id,
+        only_me,
+        payload,
+    )
+
+    # Reached only when the decision tree returned without raising. A
+    # transient send failure propagates out before this point, leaving the
+    # marker unset so the wrapper / a retry can attempt again.
+    await _mark_delivered(redis_pool, job_id)
+
+
+async def _route(
+    discord_client: discord.Client,
+    db_pool: asyncpg.Pool,
+    job_id: str,
+    requester_id: int,
+    guild_id: int | None,
+    only_me: bool,
+    payload: DeliveryPayload,
+) -> None:
+    """Run the DM/channel decision tree (no idempotency bookkeeping)."""
     if only_me:
         await _try_dm(
             discord_client,
