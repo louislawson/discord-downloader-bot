@@ -115,15 +115,19 @@ class DiscordBot(commands.Bot):
                     await self.load_extension(f"downloader_bot.cogs.{extension}")
                     self.logger.info("Loaded extension '%s'", extension)
                 except errors.ExtensionNotFound as e:
-                    self.logger.error("Couldn't find extension '%s': %s", extension, e)
+                    self.logger.exception(
+                        "Couldn't find extension '%s': %s", extension, e
+                    )
                 except errors.ExtensionAlreadyLoaded as e:
-                    self.logger.error("Extension already loaded '%s': %s", extension, e)
+                    self.logger.exception(
+                        "Extension already loaded '%s': %s", extension, e
+                    )
                 except errors.NoEntryPointError as e:
-                    self.logger.error(
+                    self.logger.exception(
                         "Extension has no setup() entry point '%s': %s", extension, e
                     )
                 except errors.ExtensionFailed as e:
-                    self.logger.error(
+                    self.logger.exception(
                         "Extension '%s' raised an error during load: %s", extension, e
                     )
 
@@ -159,7 +163,8 @@ class DiscordBot(commands.Bot):
             await self.arq_pool.aclose()
         if self.db_pool is not None:
             await self.db_pool.close()
-        await self.healthcheck_server.wait_closed()
+        if self.healthcheck_server is not None:
+            await self.healthcheck_server.wait_closed()
         await super().close()
 
     # pylint: disable=arguments-differ
