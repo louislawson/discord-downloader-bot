@@ -25,6 +25,7 @@ import pytest
 from downloader_bot.worker.zip_stream import (
     AttachmentStreamError,
     Counters,
+    ZipStreamResult,
     _iter_chunks,
     _members,
     build_zip_stream,
@@ -306,3 +307,47 @@ class TestBuildZipStream:
         assert max(sizes) < 1024 * 1024, (
             f"peak yield was {max(sizes)} bytes — pipeline may be buffering"
         )
+
+
+# --- ZipStreamResult contract ----------------------------------------------
+
+
+class TestCountersContract:
+    async def test_counters_raise_when_read_before_drain(self):
+        async def _iter():
+            yield b"first"
+            yield b"second"
+
+        result = ZipStreamResult(iterable=_iter(), counters=Counters(images=2))
+
+        # Mid-stream read must raise — counters are populated lazily and
+        # any reader who beats the consumer to the punch sees the wrong
+        # answer. Better to fail loudly than silently mislead.
+        with pytest.raises(RuntimeError, match="drained"):
+            _ = result.counters
+
+    async def test_counters_readable_after_natural_drain(self):
+        async def _iter():
+            yield b"first"
+            yield b"second"
+
+        result = ZipStreamResult(iterable=_iter(), counters=Counters(images=2))
+
+        async for _ in result.iterable:
+            pass
+
+        assert result.counters.images == 2
+
+    async def test_counters_remain_locked_after_mid_stream_exception(self):
+        async def _iter():
+            yield b"first"
+            raise RuntimeError("boom")
+
+        result = ZipStreamResult(iterable=_iter(), counters=Counters(images=1))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            async for _ in result.iterable:
+                pass
+
+        with pytest.raises(RuntimeError, match="drained"):
+            _ = result.counters

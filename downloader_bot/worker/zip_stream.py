@@ -54,16 +54,37 @@ class Counters:
     videos: int = 0
 
 
-@dataclass
 class ZipStreamResult:
     """The async-iterable zip stream paired with its counters.
 
-    Counters are mutated as ``iterable`` is consumed — read them strictly
-    after the consumer has finished draining the iterable.
+    The ``counters`` property raises until the iterable has been drained
+    to natural completion. Reading counts mid-stream would be a bug
+    (the values are mutated incrementally as members are yielded), so
+    the guard turns that into a loud failure rather than a silent
+    wrong-answer. Mid-stream exceptions leave ``_drained=False``, which
+    is the correct signal that the totals are not trustworthy.
     """
 
-    iterable: AsyncIterable[bytes]
-    counters: Counters
+    def __init__(self, iterable: AsyncIterable[bytes], counters: Counters) -> None:
+        self._counters = counters
+        self._drained = False
+        self.iterable = self._wrap(iterable)
+
+    async def _wrap(self, inner: AsyncIterable[bytes]) -> AsyncIterator[bytes]:
+        async for chunk in inner:
+            yield chunk
+        self._drained = True
+
+    @property
+    def counters(self) -> Counters:
+        if not self._drained:
+            raise RuntimeError(
+                "ZipStreamResult.counters read before the iterable was "
+                "drained — counters are populated lazily during consumption "
+                "and are only safe to read after the consumer (e.g. "
+                "upload_blob) has fully iterated the stream."
+            )
+        return self._counters
 
 
 async def _iter_chunks(
