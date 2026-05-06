@@ -244,6 +244,65 @@ class TestModeChannel:
         user_mock.send.assert_awaited_once()
         mock_discord_client.fetch_channel.assert_not_awaited()
 
+    async def test_channel_post_forbidden_falls_back_to_dm_fail_closed(
+        self,
+        mock_discord_client,
+        mock_redis,
+        make_db_pool,
+        user_mock,
+        channel_mock,
+        forbidden_factory,
+    ):
+        pool = make_db_pool(mode="channel", channel_id=999)
+        channel_mock.send = AsyncMock(side_effect=forbidden_factory())
+        mock_discord_client.fetch_channel.return_value = channel_mock
+        mock_discord_client.fetch_user.return_value = user_mock
+
+        await deliver(
+            mock_discord_client,
+            mock_redis,
+            pool,
+            "job-channel-forbidden",
+            42,
+            guild_id=12345,
+            only_me=False,
+            payload=_payload(),
+        )
+
+        channel_mock.send.assert_awaited_once()
+        # Failure must fall back to DM rather than propagating to the wrapper.
+        user_mock.send.assert_awaited_once()
+        # Successful fallback DM is treated as a completed attempt.
+        mock_redis.set.assert_awaited_once()
+
+    async def test_channel_not_found_falls_back_to_dm(
+        self,
+        mock_discord_client,
+        mock_redis,
+        make_db_pool,
+        user_mock,
+    ):
+        pool = make_db_pool(mode="channel", channel_id=999)
+        response = MagicMock(status=404, reason="Not Found")
+        mock_discord_client.fetch_channel = AsyncMock(
+            side_effect=discord.NotFound(response, "deleted")
+        )
+        mock_discord_client.fetch_user.return_value = user_mock
+
+        await deliver(
+            mock_discord_client,
+            mock_redis,
+            pool,
+            "job-channel-not-found",
+            42,
+            guild_id=12345,
+            only_me=False,
+            payload=_payload(),
+        )
+
+        # Channel lookup raised; DM was attempted as fallback.
+        user_mock.send.assert_awaited_once()
+
 
 class TestModeBoth:
     async def test_dm_succeeds_skips_channel_post(
@@ -325,3 +384,36 @@ class TestModeBoth:
 
         user_mock.send.assert_awaited_once()
         mock_discord_client.fetch_channel.assert_not_awaited()
+
+    async def test_dm_blocked_and_channel_post_forbidden_drops_silently(
+        self,
+        mock_discord_client,
+        mock_redis,
+        make_db_pool,
+        user_mock,
+        channel_mock,
+        forbidden_factory,
+    ):
+        pool = make_db_pool(mode="both", channel_id=999)
+        user_mock.send = AsyncMock(side_effect=forbidden_factory())
+        channel_mock.send = AsyncMock(side_effect=forbidden_factory())
+        mock_discord_client.fetch_user.return_value = user_mock
+        mock_discord_client.fetch_channel.return_value = channel_mock
+
+        # Both routes blocked; deliver must complete without raising.
+        await deliver(
+            mock_discord_client,
+            mock_redis,
+            pool,
+            "job-both-blocked",
+            42,
+            guild_id=12345,
+            only_me=False,
+            payload=_payload(),
+        )
+
+        user_mock.send.assert_awaited_once()
+        channel_mock.send.assert_awaited_once()
+        # Both routes attempted = a completed attempt; the marker IS written
+        # to prevent re-attempts within the TTL.
+        mock_redis.set.assert_awaited_once()

@@ -65,11 +65,13 @@ async def deliver(
     - Otherwise the guild's mode decides:
         - ``dm``      → DM the requester; Forbidden → fail closed.
         - ``channel`` → post in the configured channel mentioning the
-          requester. If no channel is configured, fall back to DM
-          (fail-closed on Forbidden — no public posting without a channel).
+          requester. If no channel is configured *or* the channel post
+          fails (Forbidden / NotFound / 5xx), fall back to DM
+          (fail-closed — no public posting without a channel).
         - ``both``    → DM first; on Forbidden, fall back to the channel.
           If no channel is configured and DM was blocked, drop with a
-          warning (DM was already attempted; no other route remains).
+          warning. If the channel post itself also fails, drop with a
+          warning — both routes have been attempted.
 
     Idempotent: a Redis-backed marker is written after the send returns
     cleanly, so ARQ retries (or the outer wrapper's failure-embed fallback)
@@ -152,7 +154,17 @@ async def _route(
                 fail_closed_reason="mode=channel, no channel configured",
             )
             return
-        await _post_to_channel(discord_client, channel_id, requester_id, payload)
+        if await _try_post_to_channel(
+            discord_client, channel_id, requester_id, payload, job_id
+        ):
+            return
+        # Channel post failed — fall back to DM, fail-closed (no other route).
+        await _try_dm(
+            discord_client,
+            requester_id,
+            payload,
+            fail_closed_reason="mode=channel, channel post failed",
+        )
         return
 
     # mode == "both"
@@ -171,7 +183,14 @@ async def _route(
             guild_id,
         )
         return
-    await _post_to_channel(discord_client, channel_id, requester_id, payload)
+    if not await _try_post_to_channel(
+        discord_client, channel_id, requester_id, payload, job_id
+    ):
+        logger.warning(
+            "Job %s: DM blocked and channel post to %s failed — dropping delivery",
+            job_id,
+            channel_id,
+        )
 
 
 async def _try_dm(
@@ -208,15 +227,44 @@ async def _try_dm(
         return False
 
 
-async def _post_to_channel(
+async def _try_post_to_channel(
     discord_client: discord.Client,
     channel_id: int,
     requester_id: int,
     payload: DeliveryPayload,
-) -> None:
-    """Post the result in a configured channel, mentioning the requester."""
-    channel = await discord_client.fetch_channel(channel_id)
-    await channel.send(
-        content=f"<@{requester_id}>",
-        embed=payload.embed,
-    )
+    job_id: str,
+) -> bool:
+    """
+    Post the result in a configured channel, mentioning the requester.
+
+    Returns ``True`` on success, ``False`` if the channel can't be reached
+    (deleted, forbidden) or Discord returned an error. Failures are logged
+    but do not raise — the caller decides whether to fall back to DM or
+    drop the delivery.
+    """
+    try:
+        channel = await discord_client.fetch_channel(channel_id)
+        await channel.send(
+            content=f"<@{requester_id}>",
+            embed=payload.embed,
+        )
+        return True
+    except discord.NotFound:
+        logger.warning(
+            "Job %s: configured results channel %s not found", job_id, channel_id
+        )
+        return False
+    except discord.Forbidden:
+        logger.warning(
+            "Job %s: forbidden to post in results channel %s",
+            job_id,
+            channel_id,
+        )
+        return False
+    except discord.HTTPException:
+        logger.exception(
+            "Job %s: discord error posting to results channel %s",
+            job_id,
+            channel_id,
+        )
+        return False
