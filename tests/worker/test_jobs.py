@@ -8,6 +8,7 @@ around it (error branches, empty-channel cleanup, success delivery).
 
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from arq.worker import Retry
 
@@ -116,7 +117,7 @@ def patch_build_zip_stream(mocker):
 
 
 class TestHappyPath:
-    async def test_uploads_and_delivers_sas_url(
+    async def test_uploads_and_delivers_success_embed(
         self,
         arq_ctx,
         mocker,
@@ -139,8 +140,9 @@ class TestHappyPath:
 
         result = await download_channel_media(arq_ctx, _payload())
 
-        assert result["ok"] is True
-        assert result["sas_url"].startswith("http://localhost:10000/")
+        # Result carries counters only — the SAS URL is a 1-hour read
+        # credential and must not be persisted in the ARQ result.
+        assert result == {"ok": True, "image_count": 2, "video_count": 1}
         mock_deliver.assert_awaited_once()
         delivered = mock_deliver.await_args.args[-1]
         assert delivered.embed.title == "Channel Media Download"
@@ -208,6 +210,63 @@ class TestEmptyChannel:
         assert delivered.embed.title == "No media found"
 
 
+# --- Discord errors fetching the channel -----------------------------------
+
+
+class TestFetchChannel:
+    async def test_not_found_returns_channel_not_found_reason(
+        self,
+        arq_ctx,
+        mocker,
+        mock_deliver,
+    ):
+        response = MagicMock(status=404, reason="Not Found")
+        arq_ctx["discord_client"].fetch_channel.side_effect = discord.NotFound(
+            response, "no such channel"
+        )
+
+        result = await download_channel_media(arq_ctx, _payload())
+
+        assert result == {"ok": False, "reason": "channel_not_found"}
+        mock_deliver.assert_awaited_once()
+        delivered = mock_deliver.await_args.args[-1]
+        assert delivered.embed.title == "Channel not found"
+
+    async def test_forbidden_returns_forbidden_fetch_reason(
+        self,
+        arq_ctx,
+        mocker,
+        forbidden_factory,
+        mock_deliver,
+    ):
+        arq_ctx["discord_client"].fetch_channel.side_effect = forbidden_factory()
+
+        result = await download_channel_media(arq_ctx, _payload())
+
+        assert result == {"ok": False, "reason": "forbidden_fetch"}
+        mock_deliver.assert_awaited_once()
+        delivered = mock_deliver.await_args.args[-1]
+        assert delivered.embed.title == "Missing permissions"
+
+    async def test_http_exception_returns_discord_http_fetch_reason(
+        self,
+        arq_ctx,
+        mocker,
+        mock_deliver,
+    ):
+        response = MagicMock(status=500, reason="Internal Server Error")
+        arq_ctx["discord_client"].fetch_channel.side_effect = discord.HTTPException(
+            response, "boom"
+        )
+
+        result = await download_channel_media(arq_ctx, _payload())
+
+        assert result == {"ok": False, "reason": "discord_http_fetch"}
+        mock_deliver.assert_awaited_once()
+        delivered = mock_deliver.await_args.args[-1]
+        assert delivered.embed.title == "Discord error"
+
+
 # --- Discord errors during the stream --------------------------------------
 
 
@@ -246,8 +305,6 @@ class TestDiscordHttpDuringStream:
         mock_deliver,
         patch_build_zip_stream,
     ):
-        import discord
-
         # Build a non-Forbidden HTTPException (e.g. 500 from history walk).
         response = MagicMock(status=500, reason="Internal Server Error")
         http_exc = discord.HTTPException(response, "boom")

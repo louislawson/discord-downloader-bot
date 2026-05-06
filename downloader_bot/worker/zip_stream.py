@@ -16,6 +16,11 @@ Public surface:
   iterable.
 - :class:`ZipStreamResult` — pairs the async iterable with its counters.
 - :func:`build_zip_stream` — factory returning a ``ZipStreamResult``.
+
+The response lifecycle is owned by the ``async with session.get(...)`` in
+:func:`_members`, which spans the chunk drain. Cancellation between the
+member yield and the consumer's drain releases the connection cleanly
+rather than leaking it.
 """
 
 from __future__ import annotations
@@ -61,17 +66,17 @@ class ZipStreamResult:
     counters: Counters
 
 
-async def _stream_response(
+async def _iter_chunks(
     resp: aiohttp.ClientResponse,
     filename: str,
     chunk_size: int,
 ) -> AsyncIterator[bytes]:
     """Yield chunks from an already-open response.
 
-    The response is pre-flighted by :func:`_members`, so by the time control
-    reaches here we have a valid 200 body and just need to stream it. Any
-    error during the body read corrupts the zip, so it surfaces as
-    :class:`AttachmentStreamError` (caller aborts the whole job).
+    The response lifecycle is owned by the ``async with`` in :func:`_members`
+    — this generator only produces bytes. Any error during the body read
+    corrupts the zip, so it surfaces as :class:`AttachmentStreamError`
+    (caller aborts the whole job).
     """
     try:
         async for chunk in resp.content.iter_chunked(chunk_size):
@@ -80,10 +85,6 @@ async def _stream_response(
         raise AttachmentStreamError(
             f"Stream of '{filename}' failed mid-flight: {e}"
         ) from e
-    finally:
-        # Always release the underlying connection back to the pool, even
-        # if the consumer stops iterating early.
-        resp.release()
 
 
 async def _members(
@@ -98,7 +99,9 @@ async def _members(
     Pre-flights each attachment GET *before* yielding the member tuple. If
     setup fails (network error, non-200 status), the attachment is skipped
     cleanly — no member tuple is yielded, so no empty zip entry is left
-    behind.
+    behind. The response is held open by an ``async with`` that spans the
+    chunk drain, so cancellation between yield and consumer iteration
+    releases the connection rather than leaking it.
     """
     async for message in channel.history(limit=None):
         for attachment in message.attachments:
@@ -109,7 +112,27 @@ async def _members(
                 continue
 
             try:
-                resp = await session.get(attachment.url).__aenter__()
+                async with session.get(attachment.url) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "Skipping attachment '%s' — HTTP %s",
+                            attachment.filename,
+                            resp.status,
+                        )
+                        continue
+
+                    if "image" in content_type:
+                        counters.images += 1
+                    elif "video" in content_type:
+                        counters.videos += 1
+
+                    yield (
+                        f"{message.id}_{attachment.filename}",
+                        message.created_at,
+                        S_IFREG | 0o600,
+                        ZIP_64,
+                        _iter_chunks(resp, attachment.filename, chunk_size),
+                    )
             except aiohttp.ClientError as e:
                 logger.warning(
                     "Skipping attachment '%s' — setup error: %s",
@@ -117,27 +140,6 @@ async def _members(
                     e,
                 )
                 continue
-            if resp.status != 200:
-                logger.warning(
-                    "Skipping attachment '%s' — HTTP %s",
-                    attachment.filename,
-                    resp.status,
-                )
-                resp.release()
-                continue
-
-            if "image" in content_type:
-                counters.images += 1
-            elif "video" in content_type:
-                counters.videos += 1
-
-            yield (
-                f"{message.id}_{attachment.filename}",
-                message.created_at,
-                S_IFREG | 0o600,
-                ZIP_64,
-                _stream_response(resp, attachment.filename, chunk_size),
-            )
 
 
 def build_zip_stream(

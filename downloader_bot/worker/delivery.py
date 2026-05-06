@@ -8,7 +8,6 @@ of an already-delivered job does not double-send.
 
 import logging
 from dataclasses import dataclass
-from io import BytesIO
 
 import asyncpg
 import discord
@@ -25,25 +24,9 @@ _DELIVERED_KEY_TTL_SECONDS = 86_400
 
 @dataclass
 class DeliveryPayload:
-    """What to send. ``attachment`` is ``(buffer, filename)`` or ``None``."""
+    """What to send."""
 
     embed: discord.Embed
-    attachment: tuple[BytesIO, str] | None = None
-
-
-def _make_file(attachment: tuple[BytesIO, str] | None) -> discord.File | None:
-    """
-    Build a fresh ``discord.File`` from the buffer, rewinding it first.
-
-    ``discord.File`` consumes its underlying ``fp`` during ``send``, so a new
-    File must be created for every attempt — important when DM fails and we
-    fall back to a channel post.
-    """
-    if attachment is None:
-        return None
-    buffer, filename = attachment
-    buffer.seek(0)
-    return discord.File(buffer, filename=filename)
 
 
 async def _is_delivered(redis_pool, job_id: str) -> bool:
@@ -208,7 +191,7 @@ async def _try_dm(
     """
     try:
         user = await discord_client.fetch_user(user_id)
-        await user.send(embed=payload.embed, file=_make_file(payload.attachment))
+        await user.send(embed=payload.embed)
         return True
     except discord.Forbidden:
         if fail_closed_reason is not None:
@@ -236,5 +219,4 @@ async def _post_to_channel(
     await channel.send(
         content=f"<@{requester_id}>",
         embed=payload.embed,
-        file=_make_file(payload.attachment),
     )

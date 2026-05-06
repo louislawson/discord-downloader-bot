@@ -2,11 +2,13 @@
 
 The tests verify three things:
 
-1. ``_stream_response`` — chunked yielding, mid-stream error translation
-   to ``AttachmentStreamError``, and connection release on every exit path.
+1. ``_iter_chunks`` — chunked yielding and mid-stream error translation
+   to ``AttachmentStreamError``. The response lifecycle is owned by
+   ``_members``'s ``async with``, not by the chunks generator.
 2. ``_members`` — pre-flight skipping (no zip entry left behind on
-   setup-time failures), counter accounting, and correct member-tuple
-   construction.
+   setup-time failures), counter accounting, correct member-tuple
+   construction, and that the response context manager exits on every
+   path (200 drained, non-200 skip, setup error).
 3. ``build_zip_stream`` end-to-end — round-trip producing a parseable
    zip including a unicode filename, plus a regression guard against
    accidental in-memory buffering of the full archive.
@@ -23,14 +25,14 @@ import pytest
 from downloader_bot.worker.zip_stream import (
     AttachmentStreamError,
     Counters,
+    _iter_chunks,
     _members,
-    _stream_response,
     build_zip_stream,
 )
 
 
 def _make_response(*, status: int = 200, chunks: tuple[bytes, ...] = ()) -> MagicMock:
-    """Mock ``aiohttp.ClientResponse`` with ``content.iter_chunked`` and ``release``."""
+    """Mock ``aiohttp.ClientResponse`` with ``content.iter_chunked``."""
     resp = MagicMock()
     resp.status = status
 
@@ -40,15 +42,16 @@ def _make_response(*, status: int = 200, chunks: tuple[bytes, ...] = ()) -> Magi
 
     resp.content = MagicMock()
     resp.content.iter_chunked = _iter_chunked
-    resp.release = MagicMock()
     return resp
 
 
-def _make_session(*responses) -> MagicMock:
+def _make_session(*responses) -> tuple[MagicMock, list[MagicMock]]:
     """Mock session whose ``get(url)`` returns sequential context managers.
 
     Each context manager's ``__aenter__`` resolves to the next response, or
-    raises if the response is an exception instance.
+    raises if the response is an exception instance. Returns the session
+    and the list of CMs so tests can assert ``__aexit__`` was awaited
+    (the response-lifecycle invariant).
     """
     session = MagicMock()
     cms = []
@@ -61,7 +64,7 @@ def _make_session(*responses) -> MagicMock:
         cm.__aexit__ = AsyncMock(return_value=False)
         cms.append(cm)
     session.get = MagicMock(side_effect=cms)
-    return session
+    return session, cms
 
 
 def _make_attachment(
@@ -96,17 +99,18 @@ def _channel_with(messages, async_iter):
     return channel
 
 
-# --- _stream_response -------------------------------------------------------
+# --- _iter_chunks -----------------------------------------------------------
 
 
-class TestStreamResponse:
-    async def test_yields_chunks_then_releases(self):
+class TestIterChunks:
+    async def test_yields_chunks(self):
+        # Response lifecycle is owned by ``_members``'s ``async with`` —
+        # ``_iter_chunks`` itself is just bytes-in, bytes-out.
         resp = _make_response(chunks=(b"aa", b"bb", b"cc"))
 
-        out = [c async for c in _stream_response(resp, "x.png", chunk_size=2)]
+        out = [c async for c in _iter_chunks(resp, "x.png", chunk_size=2)]
 
         assert out == [b"aa", b"bb", b"cc"]
-        resp.release.assert_called_once()
 
     async def test_mid_stream_client_error_raises_attachment_stream_error(self):
         async def _broken_iter(_size: int):
@@ -117,14 +121,10 @@ class TestStreamResponse:
         resp.status = 200
         resp.content = MagicMock()
         resp.content.iter_chunked = _broken_iter
-        resp.release = MagicMock()
 
         with pytest.raises(AttachmentStreamError, match="failed mid-flight"):
-            async for _ in _stream_response(resp, "x.png", chunk_size=64):
+            async for _ in _iter_chunks(resp, "x.png", chunk_size=64):
                 pass
-
-        # Connection must be released even when the body raises.
-        resp.release.assert_called_once()
 
 
 # --- _members ---------------------------------------------------------------
@@ -133,7 +133,7 @@ class TestStreamResponse:
 class TestMembers:
     async def test_yields_tuple_for_200_response_and_bumps_counters(self, async_iter):
         resp = _make_response(chunks=(b"abc",))
-        session = _make_session(resp)
+        session, cms = _make_session(resp)
         att = _make_attachment(content_type="image/png", filename="a.png")
         msg = _make_message(message_id=42, attachments=(att,))
         channel = _channel_with([msg], async_iter)
@@ -143,6 +143,10 @@ class TestMembers:
         async for member in _members(
             session, channel, {"image/png"}, counters, chunk_size=64
         ):
+            # Drain the chunks generator inside the member tuple so the
+            # ``async with`` that owns ``resp`` exits before we move on.
+            async for _ in member[4]:
+                pass
             members.append(member)
 
         assert len(members) == 1
@@ -151,10 +155,12 @@ class TestMembers:
         assert mtime == msg.created_at
         assert counters.images == 1
         assert counters.videos == 0
+        # Response context must have exited cleanly.
+        cms[0].__aexit__.assert_awaited_once()
 
     async def test_skips_non_200_response_with_no_member_tuple(self, async_iter):
         resp = _make_response(status=404)
-        session = _make_session(resp)
+        session, cms = _make_session(resp)
         att = _make_attachment()
         msg = _make_message(attachments=(att,))
         channel = _channel_with([msg], async_iter)
@@ -170,11 +176,11 @@ class TestMembers:
         # No member tuple yielded → no zip entry created downstream.
         assert members == []
         assert counters.images == 0
-        # Skipped response must still be released.
-        resp.release.assert_called_once()
+        # Skipped response must still have its context manager exit cleanly.
+        cms[0].__aexit__.assert_awaited_once()
 
     async def test_skips_setup_client_error_with_no_member_tuple(self, async_iter):
-        session = _make_session(aiohttp.ClientError("dns"))
+        session, _cms = _make_session(aiohttp.ClientError("dns"))
         att = _make_attachment()
         msg = _make_message(attachments=(att,))
         channel = _channel_with([msg], async_iter)
@@ -212,16 +218,17 @@ class TestMembers:
 
     async def test_video_content_type_increments_video_counter(self, async_iter):
         resp = _make_response(chunks=(b"v",))
-        session = _make_session(resp)
+        session, _cms = _make_session(resp)
         att = _make_attachment(content_type="video/mp4", filename="v.mp4")
         msg = _make_message(attachments=(att,))
         channel = _channel_with([msg], async_iter)
         counters = Counters()
 
-        async for _ in _members(
+        async for member in _members(
             session, channel, {"video/mp4"}, counters, chunk_size=64
         ):
-            pass
+            async for _ in member[4]:
+                pass
 
         assert counters.videos == 1
         assert counters.images == 0
@@ -249,7 +256,7 @@ class TestBuildZipStream:
         body_b = "héllo 🎉".encode()
         resp_a = _make_response(chunks=(body_a,))
         resp_b = _make_response(chunks=(body_b,))
-        session = _make_session(resp_a, resp_b)
+        session, _cms = _make_session(resp_a, resp_b)
 
         att_a = _make_attachment(filename="ascii.png")
         att_b = _make_attachment(
@@ -282,7 +289,7 @@ class TestBuildZipStream:
         chunk_count = 32
         big_chunk = b"x" * chunk_size
         resp = _make_response(chunks=tuple(big_chunk for _ in range(chunk_count)))
-        session = _make_session(resp)
+        session, _cms = _make_session(resp)
 
         att = _make_attachment(filename="big.bin", content_type="image/png")
         msg = _make_message(attachments=(att,))

@@ -102,7 +102,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
         payload (dict): Job payload (see ``cogs/download.py`` for shape).
 
     Returns:
-        dict: ``{"ok": bool, ...}`` summary stored by ARQ.
+        dict: ``{"ok": bool, ...}`` summary stored by ARQ. The success
+        variant carries counters only — never the SAS URL, which would
+        otherwise sit in Redis as a 1-hour read credential.
     """
     discord_client: discord.Client = ctx["discord_client"]
     http_session: aiohttp.ClientSession = ctx["http"]
@@ -117,6 +119,18 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
     only_me = payload["only_me"]
     allowed_types = set(payload["allowed_media_types"])
 
+    async def _send_error(title: str, description: str) -> None:
+        await deliver(
+            discord_client,
+            redis_pool,
+            db_pool,
+            job_id,
+            requester_id,
+            guild_id,
+            only_me,
+            DeliveryPayload(embed=error(title=title, description=description)),
+        )
+
     logger.info(
         "Job %s started: channel=%s guild=%s requester=%s only_me=%s",
         job_id,
@@ -126,7 +140,32 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
         only_me,
     )
 
-    channel = await discord_client.fetch_channel(channel_id)
+    try:
+        channel = await discord_client.fetch_channel(channel_id)
+    except discord.NotFound:
+        logger.warning("Job %s: channel %s not found", job_id, channel_id)
+        await _send_error(
+            "Channel not found",
+            "That channel no longer exists or I can't see it.",
+        )
+        return {"ok": False, "reason": "channel_not_found"}
+    except discord.Forbidden:
+        logger.warning("Job %s: forbidden to fetch channel %s", job_id, channel_id)
+        await _send_error(
+            "Missing permissions",
+            "I don't have permission to access that channel.",
+        )
+        return {"ok": False, "reason": "forbidden_fetch"}
+    except discord.HTTPException:
+        logger.exception(
+            "Job %s: discord error fetching channel %s", job_id, channel_id
+        )
+        await _send_error(
+            "Discord error",
+            "An unexpected Discord error occurred while looking up the channel. "
+            "Please try again later.",
+        )
+        return {"ok": False, "reason": "discord_http_fetch"}
 
     # --- Phase A: build the streaming pipeline (no I/O yet) -----------------
     stream = build_zip_stream(
@@ -153,74 +192,33 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     job_id,
                     channel_id,
                 )
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=error(
-                            title="Missing permissions",
-                            description="I don't have permission to read the history of that channel.",
-                        )
-                    ),
+                await _send_error(
+                    "Missing permissions",
+                    "I don't have permission to read the history of that channel.",
                 )
                 return {"ok": False, "reason": "forbidden"}
             except discord.HTTPException:
                 logger.exception("Job %s: discord error during history walk", job_id)
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=error(
-                            title="Discord error",
-                            description="An unexpected Discord error occurred while reading the channel's history. Please try again later.",
-                        )
-                    ),
+                await _send_error(
+                    "Discord error",
+                    "An unexpected Discord error occurred while reading the "
+                    "channel's history. Please try again later.",
                 )
                 return {"ok": False, "reason": "discord_http"}
             except AttachmentStreamError:
                 logger.exception("Job %s: attachment stream failed mid-flight", job_id)
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=error(
-                            title="Discord error",
-                            description="An attachment failed to download partway through. Please try again later.",
-                        )
-                    ),
+                await _send_error(
+                    "Discord error",
+                    "An attachment failed to download partway through. "
+                    "Please try again later.",
                 )
                 return {"ok": False, "reason": "attachment_stream"}
             except (UploadError, SignedUrlError):
                 logger.exception("Job %s: storage backend failed", job_id)
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=error(
-                            title="Upload failed",
-                            description="The media archive could not be uploaded to storage. Please try again later or contact an administrator.",
-                        )
-                    ),
+                await _send_error(
+                    "Upload failed",
+                    "The media archive could not be uploaded to storage. "
+                    "Please try again later or contact an administrator.",
                 )
                 return {"ok": False, "reason": "upload_failed"}
 
@@ -242,20 +240,9 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     job_id,
                     channel_id,
                 )
-                await deliver(
-                    discord_client,
-                    redis_pool,
-                    db_pool,
-                    job_id,
-                    requester_id,
-                    guild_id,
-                    only_me,
-                    DeliveryPayload(
-                        embed=error(
-                            title="No media found",
-                            description="No allowed media types were found in that channel.",
-                        )
-                    ),
+                await _send_error(
+                    "No media found",
+                    "No allowed media types were found in that channel.",
                 )
                 return {"ok": False, "reason": "empty"}
 
@@ -277,24 +264,18 @@ async def _run_download_channel_media(ctx: dict, payload: dict) -> dict:
                     )
                 ),
             )
-            return {"ok": True, "sas_url": signed_url}
+            return {
+                "ok": True,
+                "image_count": stream.counters.images,
+                "video_count": stream.counters.videos,
+            }
     except StorageConfigError:
         # Raised by get_storage_backend() itself before the context opens —
         # belongs outside the inner try/except.
         logger.exception("Job %s: storage misconfigured", job_id)
-        await deliver(
-            discord_client,
-            redis_pool,
-            db_pool,
-            job_id,
-            requester_id,
-            guild_id,
-            only_me,
-            DeliveryPayload(
-                embed=error(
-                    title="Storage misconfigured",
-                    description="The bot's storage backend is not configured correctly. Please contact an administrator.",
-                )
-            ),
+        await _send_error(
+            "Storage misconfigured",
+            "The bot's storage backend is not configured correctly. "
+            "Please contact an administrator.",
         )
         return {"ok": False, "reason": "config"}
