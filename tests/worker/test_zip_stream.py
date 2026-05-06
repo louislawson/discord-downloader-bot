@@ -28,6 +28,7 @@ from downloader_bot.worker.zip_stream import (
     ZipStreamResult,
     _iter_chunks,
     _members,
+    _safe_filename,
     build_zip_stream,
 )
 
@@ -307,6 +308,29 @@ class TestBuildZipStream:
         assert max(sizes) < 1024 * 1024, (
             f"peak yield was {max(sizes)} bytes — pipeline may be buffering"
         )
+
+
+# --- Filename sanitisation -------------------------------------------------
+
+
+class TestSafeFilename:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("ascii.png", "ascii.png"),
+            ("naïve_😀.png", "naïve_😀.png"),
+            ("../../etc/passwd", "passwd"),
+            ("..\\..\\Windows\\System32\\evil.dll", "evil.dll"),
+            ("/absolute/path.png", "path.png"),
+            ("C:\\Users\\victim\\evil.exe", "evil.exe"),
+            ("", "unnamed"),
+            (".", "unnamed"),
+            ("..", "unnamed"),
+            ("foo/", "foo"),
+        ],
+    )
+    def test_strips_path_components_and_traversal(self, raw, expected):
+        assert _safe_filename(raw) == expected
 
 
 # --- ZipStreamResult contract ----------------------------------------------

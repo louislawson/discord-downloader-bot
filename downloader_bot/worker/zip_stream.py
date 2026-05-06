@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
+from pathlib import PureWindowsPath
 from stat import S_IFREG
 
 import aiohttp
@@ -35,6 +36,24 @@ import discord
 from stream_zip import ZIP_64, async_stream_zip
 
 logger = logging.getLogger("downloader_bot.worker.zip_stream")
+
+
+def _safe_filename(filename: str) -> str:
+    """Strip path components and disallowed names from an attachment filename.
+
+    Discord normally rejects pathlike filenames at upload, but the zip is
+    extracted by the requester's tooling — a crafted ``../../etc/passwd``
+    that slipped past Discord's checks would be a Zip Slip vector.
+    Belt-and-braces sanitisation costs ~nothing.
+
+    ``PureWindowsPath`` is used regardless of host because it treats both
+    ``/`` and ``\\`` as separators; ``PurePosixPath`` would let backslash
+    paths through on Linux runners.
+    """
+    base = PureWindowsPath(filename).name
+    if base in ("", ".", ".."):
+        return "unnamed"
+    return base
 
 
 class AttachmentStreamError(Exception):
@@ -148,7 +167,7 @@ async def _members(
                         counters.videos += 1
 
                     yield (
-                        f"{message.id}_{attachment.filename}",
+                        f"{message.id}_{_safe_filename(attachment.filename)}",
                         message.created_at,
                         S_IFREG | 0o600,
                         ZIP_64,
