@@ -106,11 +106,12 @@ class WorkerSettings:
     on_shutdown = on_shutdown
     max_jobs = 3
     job_timeout = 1800  # 30 minutes — generous for big-channel zips
-    # ARQ only honours ``max_tries`` for ``Retry``/``RetryJob``-driven
-    # retries. Arbitrary unhandled exceptions fail the job immediately
-    # regardless of this value — see ``download_channel_media``'s wrapper
-    # for how that's surfaced to the user.
-    max_tries = 2
+    # ``max_tries`` is intentionally omitted — ARQ only honours it for
+    # ``Retry``/``RetryJob``-driven retries, and no worker code raises
+    # either. Arbitrary exceptions fail the job permanently and are
+    # surfaced to the user by ``download_channel_media``'s wrapper, which
+    # is the actual retry-equivalent here. Setting ``max_tries`` to a
+    # non-default value would only mislead a future reader.
     # Refresh the Redis health-check sentinel every 30 s (TTL = interval + 1)
     # so the per-service ``arq --check`` HEALTHCHECK in docker-compose.prod.yml
     # detects a dead worker within ~60-90 s. Default is 3600 s (1 h).

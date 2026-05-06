@@ -35,12 +35,12 @@ async def download_channel_media(ctx: dict, payload: dict) -> dict:
     before re-raising so the requester isn't left waiting on a job that
     will never deliver.
 
-    ARQ's ``max_tries`` only governs ``Retry``/``RetryJob``-driven retries —
-    arbitrary exceptions go straight to a permanent ``! ... failed``, so by
-    the time we land in the ``except Exception`` branch the job is over and
-    we always need to surface something to the user. ``Retry``/``RetryJob``
-    are re-raised untouched so ARQ's retry signaling still works if a
-    future code path uses it.
+    ARQ does not retry arbitrary exceptions (``max_tries`` only governs
+    ``Retry``/``RetryJob``-driven retries, and no worker code raises
+    those today), so by the time we land in the ``except Exception``
+    branch the job is over and we always need to surface something to
+    the user. ``Retry``/``RetryJob`` are re-raised untouched so ARQ's
+    retry signaling still works if a future code path opts in.
 
     Anticipated errors (Forbidden history walks, missing storage config,
     upload failures, mid-stream attachment failures, etc.) are handled
