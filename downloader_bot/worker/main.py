@@ -14,7 +14,6 @@ discord.py's internal session — that one is configured for Discord API
 calls (token auth, rate limits) and is the wrong shape for raw CDN GETs.
 """
 
-import logging
 from typing import Any, ClassVar
 
 import aiohttp
@@ -22,18 +21,12 @@ import discord
 
 from downloader_bot.config import settings
 from downloader_bot.db.pool import open_pool as open_db_pool
+from downloader_bot.logging_setup import init_logger
 from downloader_bot.queue_client import redis_settings
 from downloader_bot.worker.discord_rest import open_client
 from downloader_bot.worker.jobs import download_channel_media
 
-logger = logging.getLogger("downloader_bot.worker")
-logger.setLevel(settings.LOGGING_LEVEL)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s")
-    )
-    logger.addHandler(handler)
+logger = init_logger("downloader_bot.worker")
 
 
 async def noop_job(ctx: dict, payload: dict[str, Any]) -> dict[str, Any]:

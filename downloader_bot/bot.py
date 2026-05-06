@@ -1,9 +1,7 @@
 """Downloader Bot to download media from a Discord Channel."""
 
-import logging
 import os
 import platform
-from typing import ClassVar
 
 import asyncpg
 import discord
@@ -15,6 +13,7 @@ from discord.ext.commands import Context, errors
 from downloader_bot.config import settings
 from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
 from downloader_bot.embeds import error
+from downloader_bot.logging_setup import init_logger
 from downloader_bot.presence import STATUSES, cycle_random
 from downloader_bot.queue_client import open_pool
 
@@ -22,59 +21,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 
-class LoggingFormatter(logging.Formatter):
-    """
-    Custom logging formatter for discord.py.
-
-    Attributes:
-        black (str): black ANSI code.
-        red (str): red ANSI code.
-        green (str): green ANSI code.
-        yellow (str): yellow ANSI code.
-        blue (str): blue ANSI code.
-        gray (str): gray ANSI code.
-        reset (str): reset ANSI code.
-        bold (str): bold ANSI code.
-        COLORS (Dict[int, str]): Relates logging level to a colour/style.
-    """
-
-    # Colors
-    black = "\x1b[30m"
-    red = "\x1b[31m"
-    green = "\x1b[32m"
-    yellow = "\x1b[33m"
-    blue = "\x1b[34m"
-    gray = "\x1b[38m"
-    # Styles
-    reset = "\x1b[0m"
-    bold = "\x1b[1m"
-
-    COLORS: ClassVar[dict[int, str]] = {
-        logging.DEBUG: gray + bold,
-        logging.INFO: blue + bold,
-        logging.WARNING: yellow + bold,
-        logging.ERROR: red,
-        logging.CRITICAL: red + bold,
-    }
-
-    def format(self, record):
-        log_color = self.COLORS[record.levelno]
-        log_format = "(black){asctime}(reset) (levelcolor){levelname:<8}(reset) (green){name}(reset) {message}"
-        log_format = log_format.replace("(black)", self.black + self.bold)
-        log_format = log_format.replace("(reset)", self.reset)
-        log_format = log_format.replace("(levelcolor)", log_color)
-        log_format = log_format.replace("(green)", self.green + self.bold)
-        formatter = logging.Formatter(log_format, "%Y-%m-%d %H:%M:%S", style="{")
-        return formatter.format(record)
-
-
-logger = logging.getLogger("discord_bot")
-logger.setLevel(settings.LOGGING_LEVEL)
-
-# Console handler
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(LoggingFormatter())
-logger.addHandler(console_handler)
+logger = init_logger("downloader_bot")
 
 
 class DiscordBot(commands.Bot):
