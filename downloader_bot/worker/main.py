@@ -67,17 +67,53 @@ async def on_startup(ctx: dict) -> None:
     aiohttp ``ClientSession`` for CDN downloads — all shared by every job in
     this worker and stored as ``ctx['discord_client']``, ``ctx['db_pool']``,
     and ``ctx['http']``.
+
+    If any setup step raises, already-opened resources are cleaned up
+    before the exception propagates. ARQ does not call ``on_shutdown``
+    when ``on_startup`` raises, so any leak here would be permanent for
+    the worker process's lifetime.
     """
     logger.info("Worker starting up (REDIS_URL=%s)", settings.REDIS_URL)
-    ctx["discord_client"] = await open_client(settings.TOKEN)
-    logger.info("REST-only Discord client logged in")
-    ctx["db_pool"] = await open_db_pool()
-    logger.info("Connected to Postgres")
-    ctx["http"] = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=1800, sock_read=60),
-        connector=aiohttp.TCPConnector(limit=20, limit_per_host=10),
-    )
-    logger.info("Opened aiohttp ClientSession for CDN downloads")
+    try:
+        ctx["discord_client"] = await open_client(settings.TOKEN)
+        logger.info("REST-only Discord client logged in")
+        ctx["db_pool"] = await open_db_pool()
+        logger.info("Connected to Postgres")
+        ctx["http"] = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=1800, sock_read=60),
+            connector=aiohttp.TCPConnector(limit=20, limit_per_host=10),
+        )
+        logger.info("Opened aiohttp ClientSession for CDN downloads")
+    except Exception:
+        logger.exception("Worker startup failed — cleaning up partial resources")
+        await _close_partial_resources(ctx)
+        raise
+
+
+async def _close_partial_resources(ctx: dict) -> None:
+    """Close whichever resources were opened before ``on_startup`` failed.
+
+    Each close is wrapped so a cleanup error doesn't mask the original
+    startup exception.
+    """
+    client = ctx.pop("discord_client", None)
+    if client is not None:
+        try:
+            await client.close()
+        except Exception:
+            logger.exception("Error closing Discord client during startup cleanup")
+    db_pool = ctx.pop("db_pool", None)
+    if db_pool is not None:
+        try:
+            await db_pool.close()
+        except Exception:
+            logger.exception("Error closing Postgres pool during startup cleanup")
+    http = ctx.pop("http", None)
+    if http is not None:
+        try:
+            await http.close()
+        except Exception:
+            logger.exception("Error closing aiohttp session during startup cleanup")
 
 
 async def on_shutdown(ctx: dict) -> None:
