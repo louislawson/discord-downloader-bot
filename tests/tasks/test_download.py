@@ -22,9 +22,17 @@ from downloader_bot.storage.exceptions import UploadError
 from downloader_bot.tasks.download import download_channel_media
 
 
-def _messageable_channel():
-    """Return a channel mock that passes ``isinstance(..., discord.abc.Messageable)``."""
+def _messageable_channel(channel_id: int = 555, name: str = "general"):
+    """Return a channel mock that passes ``isinstance(..., discord.abc.Messageable)``.
+
+    ``id`` and ``name`` are set explicitly because ``discord.abc.Messageable``
+    doesn't define them on the ABC — with ``spec=Messageable`` the mock would
+    otherwise raise ``AttributeError`` when the orchestrator calls
+    ``_display_filename(channel)``.
+    """
     channel = MagicMock(spec=discord.abc.Messageable)
+    channel.id = channel_id
+    channel.name = name
     return channel
 
 
