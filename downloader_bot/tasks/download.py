@@ -124,6 +124,7 @@ async def download_channel_media(
             archive_url = await storage.upload_and_sign(
                 name=key,
                 data=stream,
+                ttl=ttl,
                 download_filename=_display_filename(channel),
             )
             upload_succeeded = True
