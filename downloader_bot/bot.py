@@ -13,6 +13,7 @@ from downloader_bot.config import settings
 from downloader_bot.embeds import error
 from downloader_bot.logging_setup import init_logger
 from downloader_bot.presence import STATUSES, cycle_random
+from downloader_bot.tq import broker
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -92,6 +93,8 @@ class DiscordBot(commands.Bot):
             "Running on: %s %s (%s)", platform.system(), platform.release(), os.name
         )
         self.logger.info("-------------------")
+        if not broker.is_worker_process:
+            await broker.startup()
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
         self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
@@ -100,6 +103,8 @@ class DiscordBot(commands.Bot):
     async def close(self):
         if self.healthcheck_server is not None:
             await self.healthcheck_server.wait_closed()
+        if not broker.is_worker_process:
+            await broker.shutdown()
         await super().close()
 
     # pylint: disable=arguments-differ
