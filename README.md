@@ -1,29 +1,26 @@
 # Downloader Bot
 
-A Discord bot that bundles every image (or other allowed media) in a channel into a single zip and hands the user a download link. The zip is uploaded to Azure Blob Storage and shared as a 1-hour SAS URL; if Azure is unavailable, the bot falls back to delivering the zip as a direct Discord attachment when it fits the server's upload limit.
+A Discord bot that bundles every image (or other allowed media) in a channel into a single zip and hands the user a download link. The zip is streamed straight into Azure Blob Storage and shared as a SAS URL — TTL defaults to 24 hours and is configurable per-guild. The end-to-end pipeline (`channel.history()` → aiohttp chunked GET → `stream-zip` → Azure block-blob upload) never materialises the full archive in memory, so it scales to channels of any size.
 
-The bot itself only enqueues jobs — a separate ARQ worker (same image, different `CMD`) runs the channel-history walk, zipping, upload, and delivery. This lets downloads outlive Discord's 15-minute interaction-token window and keeps long-running downloads in one channel from blocking another.
+The bot itself only enqueues Taskiq tasks — a separate Taskiq worker (same image, different `CMD`) pulls them off RabbitMQ and runs the channel-history walk, zipping, upload, and delivery. This lets downloads outlive Discord's 15-minute interaction-token window and keeps long-running downloads in one channel from blocking another.
 
 ## Commands
 
-- **`/download [only_me]`** — Queues a job that collects every attachment in the current channel matching `ALLOWED_MEDIA_TYPES`, zips them, and delivers a download link. Set `only_me: true` to force private DM delivery (overrides the server's configured mode).
-- **`/setup mode <dm|channel|both>`** — Server-owner only. Sets how completed downloads are delivered. `dm` sends to the requester only; `channel` posts in a configured channel mentioning them; `both` DMs first and falls back to the channel if the DM is blocked.
-- **`/setup channel <#channel>`** — Server-owner only. Sets the channel used by `channel` mode (and as the fallback for `both`).
-- **`/setup clear`** — Server-owner only. Unsets the configured results channel.
-- **`/setup show`** — Server-owner only. Displays current delivery settings.
+- **`/download [only_me]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. Set `only_me: true` to force private DM delivery (overrides the server's configured mode).
+- **`/setup delivery_mode [results_channel] [retention_hours]`** — Server-owner only. Overwrites delivery settings for this guild in one shot. `delivery_mode=dm` sends to the requester; `delivery_mode=channel` posts in `results_channel` (required for that mode) and falls back to DM if the channel is unusable at delivery time. `retention_hours` controls SAS URL lifetime (default `24`).
 - **`/invite`** — DMs the requester the bot's invite link (configured via `INVITE_LINK`); falls back to an ephemeral channel reply if DMs are blocked.
-- **`/sync`** — Bot-owner only. Re-registers slash commands globally or per-guild. Run this after deploying new commands.
-- **`<PREFIX>queueping`** — Bot-owner only, prefix-only. Enqueues a `noop_job` to verify the bot↔worker round trip without exercising the download path.
+- **`<PREFIX>sync global|guild`** — Bot-owner only, prefix-only. Re-registers slash commands. Run this after deploying new commands.
 
-All commands are hybrid — they work with the configured `PREFIX` (e.g. `??download`) as well as the slash-command UI.
+All `/` commands are hybrid — they work with the configured `PREFIX` (e.g. `??download`) as well as the slash-command UI.
 
 ## Quick Start (Development)
 
-The dev environment uses Docker Compose to run the bot, an ARQ worker, Redis (job queue), Postgres (per-guild settings), and [Azurite](https://github.com/Azure/Azurite) (Microsoft's local Azure Blob Storage emulator), so no real Azure account is needed.
+The dev environment uses Docker Compose to run the bot, a Taskiq worker + scheduler, RabbitMQ (job broker), Redis (result backend + idempotency state), Postgres (per-guild settings), [Azurite](https://github.com/Azure/Azurite) (Microsoft's local Azure Blob Storage emulator), and the [Taskiq Admin](https://github.com/taskiq-python/taskiq-admin) UI on `http://localhost:3000`. No real Azure account is needed.
 
 ```bash
 cp .env.example .env
-# Fill in TOKEN at minimum. For Azurite, set:
+# Fill in TOKEN, RABBITMQ_DEFAULT_USER/PASS, POSTGRES_PASSWORD, and TASKIQ_ADMIN_API_TOKEN.
+# For Azurite, set:
 #   ENVIRONMENT=dev
 #   AZURE_INT_URL=http://azurite:10000/devstoreaccount1
 #   AZURE_EXT_URL=http://localhost:10000/devstoreaccount1
@@ -33,13 +30,13 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Both the bot and worker run under [watchfiles](https://watchfiles.helpmanual.io/), so any `.py` change under [downloader_bot/](downloader_bot/) triggers an automatic restart. The repo is mounted into `/bot/` inside both containers.
+The bot runs under [watchfiles](https://watchfiles.helpmanual.io/) and the worker / scheduler use Taskiq's own `--reload` flag, so any `.py` change under [downloader_bot/](downloader_bot/) triggers an automatic restart. The repo is mounted into `/bot/` inside every service.
 
-When `ENVIRONMENT=dev`, generated SAS URLs are rewritten from `AZURE_INT_URL` (the in-network Azurite hostname) to `AZURE_EXT_URL` (the host-reachable one) so links opened in your browser actually resolve — see [downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py).
+When `ENVIRONMENT=dev`, generated SAS URLs are rewritten from `AZURE_INT_URL` (the in-network Azurite hostname) to `AZURE_EXT_URL` (the host-reachable one) so links opened in your browser actually resolve — see [downloader_bot/storage/azure.py](downloader_bot/storage/azure.py).
 
 ## Production
 
-Build the image and run two containers from it (bot + worker), pointing both at the same Redis, Postgres, and Azure Storage.
+Build the image and run three containers from it (bot + worker + scheduler), pointing them at the same RabbitMQ, Redis, Postgres, and Azure Storage. [docker-compose.prod.yml](docker-compose.prod.yml) is a working reference.
 
 ```bash
 # x86_64
@@ -53,16 +50,24 @@ docker run -d --name downloader-bot --env-file .env.prod downloader-bot:<VERSION
 
 # Worker (REST-only, runs the actual downloads)
 docker run -d --name downloader-bot-worker --env-file .env.prod \
-  downloader-bot:<VERSION> arq downloader_bot.worker.main.WorkerSettings
+  -e TASKIQ_PROCESS_ROLE=worker \
+  downloader-bot:<VERSION> \
+  python -m taskiq worker downloader_bot.tq:broker downloader_bot.tasks
+
+# Scheduler (cron source for future scheduled tasks; safe to omit if nothing is scheduled yet)
+docker run -d --name downloader-bot-scheduler --env-file .env.prod \
+  -e TASKIQ_PROCESS_ROLE=scheduler \
+  downloader-bot:<VERSION> \
+  python -m taskiq scheduler downloader_bot.tq:scheduler downloader_bot.tasks
 ```
 
-You'll also need Redis and Postgres reachable from both containers (managed services or self-hosted; the dev compose file shows the minimum config). The bot bootstraps the Postgres schema idempotently on startup — no migration step required.
+You'll also need RabbitMQ, Redis, and Postgres reachable from every container (managed services or self-hosted; the dev compose file shows the minimum config). The Postgres schema is bootstrapped idempotently the first time the worker opens its pool — no separate migration step required.
 
 The production image:
 
 - Runs as a non-root `discordbot` user
 - Uses [Tini](https://github.com/krallin/tini) as PID 1 for proper signal handling and zombie reaping
-- Defines per-service Docker `HEALTHCHECK`s in [docker-compose.prod.yml](docker-compose.prod.yml) — the bot uses [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) to verify its gateway connection, and the worker uses `arq --check` to verify its Redis heartbeat sentinel is fresh
+- Defines per-service Docker `HEALTHCHECK`s in [docker-compose.prod.yml](docker-compose.prod.yml) — the bot uses [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) to verify its gateway connection, and the worker / scheduler use `python -m downloader_bot.worker.healthcheck` to verify a fresh Redis heartbeat sentinel exists for their `TASKIQ_PROCESS_ROLE`
 
 For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point `AZURE_CONN_STR` at your real storage account.
 
@@ -70,21 +75,28 @@ For production, set `ENVIRONMENT=prod` (disables the SAS URL rewrite) and point 
 
 All configuration is loaded from `.env` by [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) (see [downloader_bot/config.py](downloader_bot/config.py)). Copy `.env.example` and fill in the values.
 
-| Variable              | Required | Description                                                                                                                         |
-| --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `TOKEN`               | yes      | Discord bot token.                                                                                                                  |
-| `PREFIX`              | yes      | Prefix for text commands (e.g. `??`). Slash commands always work regardless.                                                        |
-| `ENVIRONMENT`         | yes      | `prod` or `dev`. Toggles the SAS URL hostname rewrite.                                                                              |
-| `ALLOWED_MEDIA_TYPES` | yes      | JSON array of MIME types to collect (see `.env.example`). Attachments outside this list are silently skipped.                       |
-| `STORAGE_BACKEND`     | yes      | Object-storage backend. Currently only `azure` is supported; the storage layer dispatches on this value.                            |
-| `AZURE_CONN_STR`      | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                   |
-| `AZURE_CONTAINER`     | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                         |
-| `POSTGRES_DSN`        | yes      | asyncpg DSN for the Postgres instance holding per-guild settings. Defaults to the compose-stack value.                              |
-| `REDIS_URL`           | yes      | URL of the Redis broker used as the ARQ job queue. Defaults to the compose-stack value.                                             |
-| `AZURE_INT_URL`       | dev only | Internal Azure Storage URL — the hostname the bot uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`). |
-| `AZURE_EXT_URL`       | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                   |
-| `LOGGING_LEVEL`       | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                            |
-| `INVITE_LINK`         | no       | Bot invite URL surfaced by `/invite`. If unset, `/invite` will DM a broken link — set this to a real OAuth invite URL.              |
+| Variable                                | Required | Description                                                                                                                                          |
+| --------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TOKEN`                                 | yes      | Discord bot token.                                                                                                                                   |
+| `PREFIX`                                | yes      | Prefix for text commands (e.g. `??`). Slash commands always work regardless.                                                                         |
+| `ENVIRONMENT`                           | yes      | `prod` or `dev`. Toggles the SAS URL hostname rewrite.                                                                                               |
+| `ALLOWED_MEDIA_TYPES`                   | yes      | JSON array of MIME types to collect (see `.env.example`). Used as the default when a guild hasn't set its own filter.                                |
+| `STORAGE_BACKEND`                       | yes      | Object-storage backend. Currently only `azure` is supported; the storage layer dispatches on this value.                                             |
+| `AZURE_CONN_STR`                        | yes      | Azure Blob Storage connection string. SAS URL generation requires this to contain an account key.                                                    |
+| `AZURE_CONTAINER`                       | yes      | Blob container name. The dev compose stack auto-creates one called `media`.                                                                          |
+| `POSTGRES_DSN`                          | yes      | asyncpg DSN for the Postgres instance holding per-guild settings. Defaults to the compose-stack value.                                               |
+| `REDIS_URL`                             | yes      | Redis URL — Taskiq result backend, `taskiq-cancellation` state holder, and app-level idempotency state. Defaults to the compose-stack value.         |
+| `RABBITMQ_DEFAULT_USER`                 | yes      | RabbitMQ username. The Taskiq broker connects to `amqp://$RABBITMQ_DEFAULT_USER:$RABBITMQ_DEFAULT_PASS@rabbitmq:5672`.                               |
+| `RABBITMQ_DEFAULT_PASS`                 | yes      | RabbitMQ password.                                                                                                                                   |
+| `POSTGRES_USER` / `PASSWORD` / `DB`     | dev only | Used by the `postgres` compose service to bootstrap the database.                                                                                    |
+| `AZURE_INT_URL`                         | dev only | Internal Azure Storage URL — the hostname the worker uses to reach the storage backend (e.g. `http://azurite:10000/devstoreaccount1`).               |
+| `AZURE_EXT_URL`                         | dev only | External Azure Storage URL — the hostname end users will use to download from generated SAS URLs.                                                    |
+| `LOGGING_LEVEL`                         | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                                             |
+| `INVITE_LINK`                           | no       | Bot invite URL surfaced by `/invite`. If unset, `/invite` will DM a broken link — set this to a real OAuth invite URL.                               |
+| `ATTACHMENT_CHUNK_SIZE`                 | no       | CDN read chunk size for the streaming-zip pipeline (default 64 KiB). Also caps per-job in-flight bytes from the CDN.                                 |
+| `TASKIQ_ADMIN_URL`                      | no       | Base URL of the Taskiq Admin UI. Required if you want the admin middleware to publish task lifecycle events.                                         |
+| `TASKIQ_ADMIN_API_TOKEN`                | no       | API token the bot uses to authenticate to the admin UI (and the value the `taskiq_admin` compose service requires).                                  |
+| `TASKIQ_ADMIN_BROKER_NAME`              | no       | Friendly broker name shown in the admin UI.                                                                                                          |
 
 ## Project Layout
 
@@ -93,31 +105,39 @@ downloader-bot/
 ├── downloader_bot/         # Application package — drop new modules here
 │   ├── bot.py              # Bot entry point: gateway client, cog loader, global error handler
 │   ├── config.py           # pydantic-settings singleton loaded from .env
+│   ├── embeds.py           # success/error/info/media_download embed helpers
+│   ├── logging_setup.py    # init_logger() — one place to configure log format + level
 │   ├── presence.py         # Status strings + the no-repeat picker used by bot.status_task
-│   ├── queue_client.py     # ARQ pool factory used by the bot to enqueue jobs
+│   ├── tq.py               # Taskiq broker, scheduler, cancellation backend, worker startup hooks, typed dependency providers
 │   ├── cogs/
 │   │   ├── download.py     # /download — validates and enqueues, replies with a "queued" ack
 │   │   ├── setup.py        # /setup — server-owner-only per-guild delivery config
 │   │   ├── general.py      # /invite — DMs the configured INVITE_LINK
-│   │   └── owner.py        # <PREFIX>sync (slash-command registration) + <PREFIX>queueping (smoke-test)
+│   │   └── owner.py        # <PREFIX>sync (slash-command registration)
+│   ├── tasks/
+│   │   ├── __init__.py     # Re-exports download_channel_media for Taskiq worker discovery
+│   │   └── download.py     # download_channel_media — the two-phase orchestration (upload → deliver)
+│   ├── download/
+│   │   ├── zip_stream.py   # build_zip_stream — async iterable of zip-encoded bytes
+│   │   ├── deliver.py      # dm_user + post_to_channel (with DM fallback)
+│   │   ├── idempotency.py  # Redis-backed phase guards keyed on Taskiq task_id
+│   │   └── discord_rest.py # REST-only Discord client factory (login(), no gateway)
 │   ├── worker/
-│   │   ├── main.py         # ARQ WorkerSettings + on_startup/on_shutdown hooks (registers download_channel_media + noop_job)
-│   │   ├── jobs.py         # download_channel_media job (the four-phase pipeline)
-│   │   ├── delivery.py     # DM/channel routing + Redis-backed idempotency
-│   │   └── discord_rest.py # REST-only Discord client factory used by the worker
+│   │   └── healthcheck.py  # HeartbeatMiddleware + CLI probe used by the compose HEALTHCHECK
 │   ├── db/
-│   │   ├── schema.sql      # guild_settings table DDL (bootstrapped on bot startup)
-│   │   ├── pool.py         # asyncpg pool factory + init_schema runner
-│   │   └── guild_settings.py  # Read/write API for delivery mode + results channel
+│   │   ├── schema.sql      # guild_settings table DDL + delivery-mode invariant CHECK
+│   │   ├── pool.py         # build_pool() (opens pool + applies schema) + close_pool()
+│   │   └── guild_settings.py  # GuildSettings dataclass + GuildSettingsRepo (async repo pattern)
 │   └── storage/
-│       ├── base.py         # StorageBackend ABC (upload_and_sign + async-CM)
-│       ├── azure.py        # AzureBlobBackend — wraps Azure ContainerClient
+│       ├── base.py         # StorageBackend ABC (upload_and_sign + delete_blob + async-CM)
+│       ├── azure.py        # AzureBlobBackend — wraps Azure ContainerClient, handles Content-Disposition encoding
 │       ├── __init__.py     # get_storage_backend() factory (lazy provider import)
 │       └── exceptions.py   # Typed storage errors (config / upload / SAS)
 ├── scripts/
-│   └── start.sh            # Production entrypoint
+│   └── start.sh            # Production entrypoint (exec python -m downloader_bot.bot)
 ├── Dockerfile              # Multi-stage: builder → dev → prod
-├── docker-compose.yml      # Dev stack: bot + worker + redis + postgres + azurite
+├── docker-compose.yml      # Dev stack: bot + worker + scheduler + rabbitmq + redis + postgres + azurite + taskiq_admin
+├── docker-compose.prod.yml # Prod reference compose stack
 ├── pyproject.toml          # Project metadata + deps (azure backend via [azure] extra)
 ├── requirements-dev.txt    # Test/lint/pre-commit tooling (installs `.[azure]` editable)
 └── .env.example
@@ -125,7 +145,7 @@ downloader-bot/
 
 ## Development
 
-Tests, lint, and format are wired up via [pytest](https://docs.pytest.org/), [ruff](https://docs.astral.sh/ruff/), and [pre-commit](https://pre-commit.com/). Tests are unit-only with mocks for Discord, Azure, asyncpg, and ARQ-Redis — no compose stack needed to run them. Configuration lives in [pyproject.toml](pyproject.toml) (ruff + pytest + coverage) and [.pre-commit-config.yaml](.pre-commit-config.yaml).
+Tests, lint, and format are wired up via [pytest](https://docs.pytest.org/), [ruff](https://docs.astral.sh/ruff/), and [pre-commit](https://pre-commit.com/). Tests are unit-only with mocks for Discord, Azure, asyncpg, Redis, and Taskiq context — no compose stack needed to run them. Configuration lives in [pyproject.toml](pyproject.toml) (ruff + pytest + coverage) and [.pre-commit-config.yaml](.pre-commit-config.yaml).
 
 ### One-time setup
 
@@ -139,28 +159,29 @@ make install-dev                    # installs requirements-dev.txt + runs `pre-
 
 ### Daily commands
 
-| Make target           | Equivalent direct invocation                                                          | What it does                                                            |
-| --------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `make test`           | `python -m pytest`                                                                    | Runs the test suite.                                                    |
-| `make test-cov`       | `python -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html`   | Runs tests with coverage; HTML report at `htmlcov/index.html`.          |
-| `make lint`           | `python -m ruff check downloader_bot tests`                                           | Lints without modifying files.                                          |
-| `make format`         | `python -m ruff format downloader_bot tests && python -m ruff check --fix ...`        | Auto-formats and applies safe lint fixes in place.                      |
-| `make format-check`   | `python -m ruff format --check downloader_bot tests`                                  | Verifies formatting without writing — the CI-friendly check.            |
-| `make check`          | `lint` + `format-check` + `test` in sequence                                          | One-shot pre-push gate. Exits non-zero if anything fails.               |
-| `make precommit`      | `pre-commit run --all-files`                                                          | Runs every pre-commit hook against the entire tree.                     |
-| `make clean`          | `rm -rf .pytest_cache .ruff_cache .coverage htmlcov` + `__pycache__` sweep            | Wipes tooling caches.                                                   |
+| Make target                  | Equivalent direct invocation                                                        | What it does                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `make test`                  | `python -m pytest`                                                                  | Runs the test suite.                                           |
+| `make test-cov`              | `python -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html` | Runs tests with coverage; HTML report at `htmlcov/index.html`. |
+| `make lint`                  | `python -m ruff check downloader_bot tests`                                         | Lints without modifying files.                                 |
+| `make format`                | `python -m ruff format downloader_bot tests && python -m ruff check --fix ...`      | Auto-formats and applies safe lint fixes in place.             |
+| `make format-check`          | `python -m ruff format --check downloader_bot tests`                                | Verifies formatting without writing — the CI-friendly check.   |
+| `make check`                 | `lint` + `format-check` + `test` in sequence                                        | One-shot pre-push gate. Exits non-zero if anything fails.      |
+| `make precommit`             | `pre-commit run --all-files`                                                        | Runs every pre-commit hook against the entire tree.            |
+| `make dev` / `down` / `logs` | `docker compose up` / `down` / `logs -f bot worker`                                 | Compose-stack convenience targets.                             |
+| `make clean`                 | `rm -rf .pytest_cache .ruff_cache .coverage htmlcov` + `__pycache__` sweep          | Wipes tooling caches.                                          |
 
 > **Windows without `make`**: `make` isn't bundled with Git Bash. Either `choco install make` once, or copy-paste the right-hand "direct invocation" column. Every target is a one-liner so the fallback is mechanical.
 
 ### Recommended workflow for new code
 
 1. **Branch off `main`** and start writing — keep your editor's ruff integration on if you have one (the [Ruff VS Code extension](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff) reads `pyproject.toml` automatically).
-2. **Write the test alongside the code.** Mirror the package layout under [tests/](tests/) — e.g. a change to [downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py) belongs in [tests/worker/test_jobs.py](tests/worker/test_jobs.py). Use the existing fixtures in [tests/conftest.py](tests/conftest.py) and the per-layer `conftest.py`s rather than re-mocking from scratch.
+2. **Write the test alongside the code.** Mirror the package layout under [tests/](tests/) — e.g. a change to [downloader_bot/tasks/download.py](downloader_bot/tasks/download.py) belongs in [tests/tasks/test_download.py](tests/tasks/test_download.py); zip-stream changes belong in [tests/download/test_zip_stream.py](tests/download/test_zip_stream.py). Use the existing fixtures in [tests/conftest.py](tests/conftest.py) (`mock_redis`, `make_db_pool`, `mock_discord_client`, `mock_storage_backend`, `make_settings_repo`, `task_context`, etc.) and the per-layer `conftest.py`s rather than re-mocking from scratch.
 3. **Run a tight loop** while iterating:
 
    ```bash
-   make test                                 # full suite, ~1.5s
-   python -m pytest tests/worker/test_jobs.py -k "happy_path"   # narrower, while debugging one branch
+   make test                                            # full suite
+   python -m pytest tests/tasks/test_download.py -k "happy_path"   # narrower, while debugging one branch
    ```
 
 4. **Format + lint before committing**:
@@ -177,30 +198,29 @@ A few things worth knowing about the test setup:
 
 - `asyncio_mode = "auto"` in [pyproject.toml](pyproject.toml) means every `async def test_*` is treated as an asyncio test — no `@pytest.mark.asyncio` boilerplate.
 - The cross-cutting [tests/conftest.py](tests/conftest.py) sets required env vars (`TOKEN`, `AZURE_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because [downloader_bot/config.py](downloader_bot/config.py) constructs the `settings` singleton at import.
-- For mocking `async for` over `channel.history(...)`, use the `_AsyncIter` helper in [tests/worker/conftest.py](tests/worker/conftest.py) — `AsyncMock` returns coroutines, which `async for` rejects.
+- For mocking `async for` over `channel.history(...)`, use the helpers in [tests/download/conftest.py](tests/download/conftest.py) — `AsyncMock` returns coroutines, which `async for` rejects.
 - There is no coverage threshold yet (`--cov-fail-under` is intentionally unset). `make test-cov` is a baseline-tracking tool, not a gate.
 
 ## How It Works
 
-`/download` is split between the bot and a worker process so big-channel zips outlive Discord's 15-minute interaction-token window:
+`/download` is split between the bot and a Taskiq worker process so big-channel zips outlive Discord's 15-minute interaction-token window:
 
-1. **Bot ack ([downloader_bot/cogs/download.py](downloader_bot/cogs/download.py)).** Validates the request, builds a JSON payload (channel id, requester, `only_me`, allowed MIME types), and calls `arq_pool.enqueue_job("download_channel_media", payload, _job_id=...)`. Replies immediately with a blurple "Download queued" embed.
-2. **Worker pipeline ([downloader_bot/worker/jobs.py](downloader_bot/worker/jobs.py)).** ARQ picks up the job and runs four phases:
-   1. **Collect.** Walk channel history, filter attachments by `ALLOWED_MEDIA_TYPES`, stream each one into an in-memory `ZipFile` keyed by `{message_id}_{filename}`. Per-attachment failures are logged and skipped — one bad file doesn't abort the run.
-   2. **Validate.** If no media was found, deliver a red error embed and stop.
-   3. **Upload.** Push the zip via the configured [`StorageBackend`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs) and generate a 1-hour pre-signed URL via `upload_and_sign()`.
-   4. **Deliver.** Send a green success embed with the link and a count of bundled files via [`downloader_bot/worker/delivery.py`](downloader_bot/worker/delivery.py), which routes between DM and the configured guild channel based on per-guild `/setup` settings (Postgres-backed). A Redis SET-NX claim keyed `delivered:{job_id}` makes delivery idempotent across ARQ retries.
+1. **Bot ack ([downloader_bot/cogs/download.py](downloader_bot/cogs/download.py)).** Validates the request (pre-checks `Read Message History` on the channel for the bot), then calls `download_channel_media.kiq(channel_id=..., user_id=..., guild_id=..., only_me=...)`. Taskiq publishes the task to RabbitMQ and returns an `AsyncTaskiqTask`; the cog uses its `task_id` to render the blurple "Download queued" embed.
+2. **Worker pipeline ([downloader_bot/tasks/download.py](downloader_bot/tasks/download.py)).** A Taskiq worker pulls the task off the queue and runs two phases — each guarded by a Redis idempotency check so a retry skips already-completed work:
+   1. **Upload.** Resolve the guild's settings (delivery mode, allowed-media filter, retention hours; missing rows get safe defaults). Walk channel history via [`build_zip_stream`](downloader_bot/download/zip_stream.py) — an async iterable of zip-encoded bytes that composes `channel.history()` → aiohttp chunked GETs → `stream-zip`'s async generator. Feed the iterable directly to [`StorageBackend.upload_and_sign`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs), passing both a stable storage key (`channel-{channel_id}-{task_id}.zip`) and a friendly `download_filename` (e.g. `channel-general-2026-05-09.zip`) which the backend encodes into the SAS as a Content-Disposition override. A `try/finally` guarantees partial blobs are best-effort cleaned up on any failure path (including cancellation).
+   2. **Deliver.** If the guild's mode is `channel` and a results channel is set, post the SAS URL there (mentioning the requester); otherwise DM the requester. Channel posts fall back to DM if the channel is missing, the bot lacks permission, or the channel isn't `Messageable`. The "delivered" marker is set **after** the send returns, so a crash mid-send re-delivers on retry (duplicate DM beats no DM).
 
-If the upload fails with `UploadError`/`SignedUrlError` and the zip fits the guild's upload limit (8 MB / 50 MB / 100 MB depending on boost tier), the worker falls back to delivering the zip as a direct Discord attachment with an orange "Cloud storage unavailable" embed. `StorageConfigError` (missing storage credentials) is non-recoverable and surfaces as a hard error. Any other unhandled exception in the worker (transient Discord 5xx, network blips, unexpected SDK errors) gets a generic "Download failed" embed delivered to the requester before the exception re-raises, so a failed job never leaves the user staring at a "queued" message forever.
+Errors are handled close to their source: storage failures raise typed exceptions from [downloader_bot/storage/exceptions.py](downloader_bot/storage/exceptions.py); mid-flight attachment HTTP failures raise [`AttachmentStreamError`](downloader_bot/download/zip_stream.py); DM-disabled users raise [`DMUnavailable`](downloader_bot/download/deliver.py). Anything unexpected propagates out of the task; Taskiq's `SimpleRetryMiddleware` retries it (up to 3 times) under the same `task_id`, and the idempotency layer makes that safe.
 
-Bot-side command errors are translated to user-facing embeds by a global handler in [downloader_bot/bot.py](downloader_bot/bot.py), so cogs raise typed exceptions rather than formatting messages themselves. The `downloader_bot/cogs/setup.py` cog adds a cog-local handler for its custom `NotGuildOwner` check.
+Bot-side command errors are translated to user-facing embeds by a global handler in [downloader_bot/bot.py](downloader_bot/bot.py) using the helpers in [downloader_bot/embeds.py](downloader_bot/embeds.py), so cogs raise typed exceptions rather than formatting messages themselves. The `downloader_bot/cogs/setup.py` cog adds a cog-local handler for its custom `NotGuildOwner` check.
 
 ## Dependencies
 
 - Python 3.12
 - [discord.py](https://github.com/Rapptz/discord.py) 2.6.4
-- [ARQ](https://arq-docs.helpmanual.io/) 0.26.3 (Redis-backed job queue)
+- [Taskiq](https://taskiq-python.github.io/) 0.12.3 with [`taskiq-aio-pika`](https://github.com/taskiq-python/taskiq-aio-pika) 0.6.0 (RabbitMQ broker), [`taskiq-redis`](https://github.com/taskiq-python/taskiq-redis) 1.2.2 (result backend + schedule source), [`taskiq-cancellation`](https://github.com/taskiq-python/taskiq-cancellation) 0.0.1, and [`taskiq-dependencies`](https://github.com/taskiq-python/taskiq-dependencies) 1.5.7
 - [asyncpg](https://github.com/MagicStack/asyncpg) 0.30.0 (Postgres driver)
 - [azure-storage-blob](https://pypi.org/project/azure-storage-blob/) 12.28.0
+- [stream-zip](https://stream-zip.docs.trade.gov.uk/) ≥ 0.0.83
 - [discordhealthcheck](https://github.com/psidex/DiscordHealthcheck) 0.1.1
-- aiohttp, pydantic-settings
+- aiohttp, pydantic-settings, redis (async)
