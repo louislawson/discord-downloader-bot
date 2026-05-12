@@ -10,6 +10,8 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
 
 from downloader_bot.config import settings
+from downloader_bot.db.guild_settings import GuildSettingsRepo
+from downloader_bot.db.pool import build_pool, close_pool
 from downloader_bot.embeds import error
 from downloader_bot.logging_setup import init_logger
 from downloader_bot.presence import STATUSES, cycle_random
@@ -48,6 +50,7 @@ class DiscordBot(commands.Bot):
         self.invite_link = settings.INVITE_LINK
         self.healthcheck_server = None
         self.db_pool: asyncpg.Pool | None = None
+        self.guild_settings_repo: GuildSettingsRepo | None = None
         self._status_picker = cycle_random(STATUSES)
 
     async def load_cogs(self) -> None:
@@ -95,6 +98,8 @@ class DiscordBot(commands.Bot):
         self.logger.info("-------------------")
         if not broker.is_worker_process:
             await broker.startup()
+        self.db_pool = await build_pool()
+        self.guild_settings_repo = GuildSettingsRepo(self.db_pool)
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
         self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
@@ -105,6 +110,8 @@ class DiscordBot(commands.Bot):
             await self.healthcheck_server.wait_closed()
         if not broker.is_worker_process:
             await broker.shutdown()
+        if self.db_pool is not None:
+            await close_pool(self.db_pool)
         await super().close()
 
     # pylint: disable=arguments-differ

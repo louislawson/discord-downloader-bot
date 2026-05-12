@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from app.cogs.setup import Setup
-from app.db.guild_settings import GuildSettings
+from downloader_bot.cogs.setup import Setup
+from downloader_bot.db.guild_settings import GuildSettings
 
 
 async def _invoke(cog, ctx, **kwargs):

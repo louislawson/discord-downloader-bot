@@ -1,23 +1,21 @@
-"""Per-guild setup commands.
+"""Per-guild setup command.
 
-Server-owner-only. Configures how completed download jobs are delivered:
-
-- ``mode``    — pick ``dm``, ``channel``, or ``both``
-- ``channel`` — set the channel used by ``channel`` mode (and as the fallback
-                target for ``both``)
-- ``clear``   — unset the configured results channel
-- ``show``    — print current settings
+Server-owner-only. A single hybrid command that overwrites the guild's
+``delivery_mode`` / ``results_channel_id`` / ``retention_hours`` in one
+shot via ``GuildSettingsRepo.upsert``. ``allowed_media_types`` and
+``max_archive_size_bytes`` are left at their defaults until separate
+commands exist for them.
 """
-
-from typing import Literal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context, errors
 
-from downloader_bot.db import guild_settings
-from downloader_bot.embeds import error, info, success
+from downloader_bot.db.guild_settings import GuildSettings
+from downloader_bot.embeds import error, success
+
+_VALID_MODES = ("dm", "channel")
 
 
 class NotGuildOwner(commands.CheckFailure):
@@ -38,142 +36,90 @@ def _is_guild_owner():
 
 
 class Setup(commands.Cog, name="setup"):
-    """
-    Per-guild configuration commands.
-
-    Attributes:
-        bot (DiscordBot): The bot instance.
-    """
+    """Per-guild configuration commands."""
 
     def __init__(self, bot) -> None:
         self.bot = bot
 
-    async def _ensure_db(self, context: Context) -> bool:
-        """Ack-and-bail if the db pool isn't ready yet."""
-        if self.bot.db_pool is None:
-            self.bot.logger.error(
-                "Setup command invoked but db_pool is not initialised"
-            )
-            await context.send(
-                embed=error(
-                    title="Service unavailable",
-                    description="The configuration store is not currently available. Please try again in a moment.",
-                ),
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    @commands.hybrid_group(
+    @commands.hybrid_command(
         name="setup",
         description="Configure download delivery for this server.",
     )
     @commands.guild_only()
     @_is_guild_owner()
-    async def setup_group(self, context: Context) -> None:
-        """Show usage when invoked without a subcommand (prefix invocation only)."""
-        if context.invoked_subcommand is None:
-            await context.send(
-                embed=info(
-                    title="Setup",
-                    description=f"Use `{self.bot.bot_prefix}setup mode | channel | clear | show` (or the `/setup` slash command).",
-                ),
-                ephemeral=True,
-            )
-
-    @setup_group.command(
-        name="mode",
-        description="Set how download results are delivered.",
-    )
     @app_commands.describe(
-        mode="dm = private DM | channel = post in channel | both = DM with channel fallback",
+        delivery_mode="`dm` = private DM to the requester | `channel` = post in the configured channel",
+        results_channel="Required for `channel` mode — where results get posted.",
+        retention_hours="How many hours generated download links remain valid (default 24).",
     )
-    async def setup_mode(
+    async def setup_cmd(
         self,
         context: Context,
-        mode: Literal["dm", "channel", "both"],
+        delivery_mode: str,
+        results_channel: discord.TextChannel | None = None,
+        retention_hours: int = 24,
     ) -> None:
-        """Update the delivery mode for this guild."""
-        if not await self._ensure_db(context):
-            return
-        await guild_settings.set_mode(self.bot.db_pool, context.guild.id, mode)
-        await context.send(
-            embed=success(
-                title="Updated",
-                description=f"Delivery mode set to `{mode}`.",
-            ),
-            ephemeral=True,
-        )
+        """Overwrite this guild's delivery settings.
 
-    @setup_group.command(
-        name="channel",
-        description="Set the channel used for posting download results.",
-    )
-    @app_commands.describe(channel="The channel where results should be posted.")
-    async def setup_channel(
-        self,
-        context: Context,
-        channel: discord.TextChannel,
-    ) -> None:
-        """Set the results channel for this guild."""
-        if not await self._ensure_db(context):
-            return
-        if channel.guild.id != context.guild.id:
+        Args:
+            context: The command context.
+            delivery_mode: ``dm`` or ``channel``.
+            results_channel: The channel to post results in. Required when
+                ``delivery_mode == "channel"``; ignored otherwise.
+            retention_hours: SAS URL lifetime, in hours.
+        """
+        # Manual validation: discord.py's slash UI uses Literal for choices,
+        # but the callback can still be invoked with arbitrary strings (e.g.
+        # from prefix commands or unit tests), so we re-check here and emit
+        # a friendly embed instead of letting it fall to the global handler.
+        if delivery_mode not in _VALID_MODES:
             await context.send(
                 embed=error(
-                    title="Wrong server",
-                    description="That channel doesn't belong to this server.",
+                    title="Invalid delivery mode",
+                    description=(
+                        f"`delivery_mode` must be one of: "
+                        f"{', '.join(f'`{m}`' for m in _VALID_MODES)}."
+                    ),
                 ),
                 ephemeral=True,
             )
             return
-        await guild_settings.set_channel(
-            self.bot.db_pool,
-            context.guild.id,
-            channel.id,
+
+        # Schema invariant: delivery_mode='channel' requires a channel id.
+        # Reject early so the user sees a precise error rather than a DB
+        # IntegrityError surfaced as "Unexpected error".
+        if delivery_mode == "channel" and results_channel is None:
+            await context.send(
+                embed=error(
+                    title="Missing channel",
+                    description="`channel` mode requires a `results_channel` argument.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await self.bot.guild_settings_repo.upsert(
+            GuildSettings(
+                guild_id=context.guild.id,
+                delivery_mode=delivery_mode,
+                results_channel_id=(
+                    results_channel.id if results_channel is not None else None
+                ),
+                retention_hours=retention_hours,
+            ),
+        )
+
+        channel_str = (
+            results_channel.mention if results_channel is not None else "_not set_"
         )
         await context.send(
             embed=success(
-                title="Updated",
-                description=f"Results channel set to {channel.mention}.",
-            ),
-            ephemeral=True,
-        )
-
-    @setup_group.command(
-        name="clear",
-        description="Unset the configured results channel.",
-    )
-    async def setup_clear(self, context: Context) -> None:
-        """Clear the configured results channel for this guild."""
-        if not await self._ensure_db(context):
-            return
-        await guild_settings.clear_channel(self.bot.db_pool, context.guild.id)
-        await context.send(
-            embed=success(
-                title="Updated",
-                description="Results channel cleared.",
-            ),
-            ephemeral=True,
-        )
-
-    @setup_group.command(
-        name="show",
-        description="Show current delivery settings.",
-    )
-    async def setup_show(self, context: Context) -> None:
-        """Display current delivery settings for this guild."""
-        if not await self._ensure_db(context):
-            return
-        mode, channel_id = await guild_settings.get(
-            self.bot.db_pool,
-            context.guild.id,
-        )
-        channel_str = f"<#{channel_id}>" if channel_id else "_not set_"
-        await context.send(
-            embed=info(
-                title="Delivery settings",
-                description=f"**Mode:** `{mode}`\n**Channel:** {channel_str}",
+                title="Settings updated",
+                description=(
+                    f"**Mode:** `{delivery_mode}`\n"
+                    f"**Channel:** {channel_str}\n"
+                    f"**Retention:** `{retention_hours}h`"
+                ),
             ),
             ephemeral=True,
         )
@@ -212,10 +158,5 @@ class Setup(commands.Cog, name="setup"):
 
 
 async def setup(bot) -> None:
-    """
-    Used to load this cog into a Bot.
-
-    Args:
-        bot (DiscordBot): The bot instance to load this cog.
-    """
+    """Load this cog into a bot."""
     await bot.add_cog(Setup(bot))

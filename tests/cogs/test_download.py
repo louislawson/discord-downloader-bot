@@ -8,7 +8,8 @@ is tested in ``tests/tasks/test_download.py``.
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from app.cogs.download import Download
+
+from downloader_bot.cogs.download import Download
 
 
 async def _invoke(cog, ctx, only_me=False):
