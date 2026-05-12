@@ -36,7 +36,7 @@ services:
       target: dev
     volumes:
       - .:/bot/
-    command: [ "python", "-m", "taskiq", "worker", "--fs-discover", "--tasks-pattern", "bot/tasks/*.py", "--tasks-pattern", "bot/tasks/**/*.py", "--reload", "--reload-dir", "/bot", "--log-level=INFO", "downloader_bot.tq:broker" ]
+    command: [ "python", "-m", "taskiq", "worker", "--reload", "--reload-dir", "/bot", "--log-level=INFO", "downloader_bot.tq:broker", "downloader_bot.tasks" ]
     environment:
       - TASKIQ_PROCESS_ROLE=worker
     depends_on:
@@ -60,7 +60,7 @@ services:
       target: dev
     volumes:
       - .:/bot/
-    command: [ "python", "-m", "taskiq", "scheduler", "--fs-discover", "--tasks-pattern", "bot/tasks/*.py", "--tasks-pattern", "bot/tasks/**/*.py", "--log-level=INFO", "downloader_bot.tq:scheduler" ]
+    command: [ "python", "-m", "taskiq", "scheduler", "--log-level=INFO", "downloader_bot.tq:scheduler", "downloader_bot.tasks" ]
     environment:
       - TASKIQ_PROCESS_ROLE=scheduler
     depends_on:
