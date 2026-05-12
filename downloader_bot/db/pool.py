@@ -17,7 +17,7 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 async def build_pool() -> asyncpg.Pool:
     """Open the asyncpg pool and ensure the schema exists."""
     pool = await asyncpg.create_pool(
-        dsn=settings.DATABASE_URL,
+        dsn=settings.POSTGRES_DSN,
         min_size=1,
         max_size=10,
     )

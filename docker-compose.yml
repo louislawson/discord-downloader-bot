@@ -20,8 +20,10 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "discordhealthcheck"]
+      test: [ "CMD", "discordhealthcheck" ]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -30,52 +32,94 @@ services:
   worker:
     build:
       context: .
-      dockerfile: ./Dockerfile
+      dockerfile: Dockerfile
       target: dev
-      tags:
-        - downloader-bot-dev:latest
     volumes:
       - .:/bot/
-    env_file:
-      - .env
-    # Override the dev image's bot CMD with the arq worker entrypoint, wrapped in
-    # watchfiles so worker code changes hot-reload the same way bot.py does.
-    # Single watch path = the package directory; new files are picked up
-    # automatically.
-    command:
-      - watchfiles
-      - --filter
-      - python
-      - arq downloader_bot.worker.main.WorkerSettings
-      - /bot/downloader_bot
+    command: [ "python", "-m", "taskiq", "worker", "--fs-discover", "--tasks-pattern", "bot/tasks/*.py", "--tasks-pattern", "bot/tasks/**/*.py", "--reload", "--reload-dir", "/bot", "--log-level=INFO", "downloader_bot.tq:broker" ]
+    environment:
+      - TASKIQ_PROCESS_ROLE=worker
     depends_on:
       redis:
         condition: service_healthy
-      azurite:
-        condition: service_started
-      azurite_init:
-        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "arq", "--check", "downloader_bot.worker.main.WorkerSettings"]
+      test: [ "CMD", "python", "-m", "downloader_bot.worker.healthcheck" ]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    volumes:
+      - .:/bot/
+    command: [ "python", "-m", "taskiq", "scheduler", "--fs-discover", "--tasks-pattern", "bot/tasks/*.py", "--tasks-pattern", "bot/tasks/**/*.py", "--log-level=INFO", "downloader_bot.tq:scheduler" ]
+    environment:
+      - TASKIQ_PROCESS_ROLE=scheduler
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "python", "-m", "downloader_bot.worker.healthcheck" ]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  taskiq_admin:
+    image: ghcr.io/taskiq-python/taskiq-admin:latest
+    container_name: taskiq_admin
+    ports:
+      - 3000:3000
+    environment:
+      TASKIQ_ADMIN_API_TOKEN: ${TASKIQ_ADMIN_API_TOKEN:?}
+    volumes:
+      - admin_data:/usr/database/
 
   redis:
     image: redis:7-alpine
     container_name: redis
     hostname: redis
     restart: always
-    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 1s
-      retries: 30
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  rabbitmq:
+    image: rabbitmq:4.3.0-management-alpine
+    container_name: rabbitmq
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_log:/var/log/rabbitmq
+    healthcheck:
+      # use the flag --erlang-cookie if setting the erlang
+      # cookie was necessary (comment by red-riding-hood)
+      # test: rabbitmq-diagnostics -q ping --erlang-cookie "mycookie"
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   postgres:
     image: postgres:17-alpine
@@ -83,13 +127,13 @@ services:
     hostname: postgres
     restart: always
     environment:
-      POSTGRES_USER: downloader
-      POSTGRES_PASSWORD: downloader
-      POSTGRES_DB: downloader
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U downloader -d downloader"]
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}" ]
       interval: 1s
       retries: 30
 
@@ -126,3 +170,6 @@ services:
 volumes:
   redis-data:
   postgres-data:
+  rabbitmq_data:
+  rabbitmq_log:
+  admin_data:

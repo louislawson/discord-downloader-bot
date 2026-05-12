@@ -46,5 +46,14 @@ class Settings(BaseSettings):
     # in-flight bytes from the CDN.
     ATTACHMENT_CHUNK_SIZE: int = 64 * 1024
 
+    # Taskiq Admin
+    TASKIQ_ADMIN_URL: str | None = None
+    TASKIQ_ADMIN_API_TOKEN: str | None = None
+    TASKIQ_ADMIN_BROKER_NAME: str | None = None
+
+    # RabbitMQ
+    RABBITMQ_DEFAULT_USER: str
+    RABBITMQ_DEFAULT_PASS: str
+
 
 settings = Settings()

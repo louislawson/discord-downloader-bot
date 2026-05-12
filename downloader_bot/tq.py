@@ -1,4 +1,3 @@
-import os
 from contextlib import AsyncExitStack
 from typing import Annotated
 
@@ -25,20 +24,20 @@ from downloader_bot.worker.healthcheck import HeartbeatMiddleware
 
 broker = (
     AioPikaBroker(
-        "amqp://guest:guest@rabbitmq:5672",
+        f"amqp://{settings.RABBITMQ_DEFAULT_USER}:{settings.RABBITMQ_DEFAULT_PASS}@rabbitmq:5672",
     )
     .with_result_backend(
         RedisAsyncResultBackend(
-            "redis://redis:6379",
+            settings.REDIS_URL,
             result_ex_time=86400,
             keep_results=False,
         )
     )
     .with_middlewares(
         TaskiqAdminMiddleware(
-            url=os.environ.get("TASKIQ_ADMIN_URL", "http://taskiq_admin:3000"),
-            api_token=os.environ.get("TASKIQ_ADMIN_API_TOKEN", "supersecret"),
-            taskiq_broker_name="mybroker",
+            url=settings.TASKIQ_ADMIN_URL or "",
+            api_token=settings.TASKIQ_ADMIN_API_TOKEN or "",
+            taskiq_broker_name=settings.TASKIQ_ADMIN_BROKER_NAME or "",
         ),
         HeartbeatMiddleware(redis_url=settings.REDIS_URL),
         SimpleRetryMiddleware(default_retry_count=3),
@@ -120,11 +119,13 @@ def get_redis(
 
 
 cancellation_backend = ModularCancellationBackend(
-    RedisCancellationStateHolder("redis://redis:6379"),
-    AioPikaNotifier("amqp://guest:guest@rabbitmq:5672"),
+    RedisCancellationStateHolder(settings.REDIS_URL),
+    AioPikaNotifier(
+        f"amqp://{settings.RABBITMQ_DEFAULT_USER}:{settings.RABBITMQ_DEFAULT_PASS}@rabbitmq:5672",
+    ),
 ).with_broker(broker)
 
-redis_source = RedisScheduleSource("redis://redis:6379")
+redis_source = RedisScheduleSource(settings.REDIS_URL)
 
 scheduler = TaskiqScheduler(
     broker,
