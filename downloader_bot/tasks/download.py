@@ -1,7 +1,8 @@
 """Taskiq orchestrator for the channel-media download pipeline."""
 
 import logging
-from datetime import timedelta
+import re
+from datetime import date, timedelta
 from typing import Annotated, TypedDict
 
 import aiohttp
@@ -37,6 +38,17 @@ class DownloadResult(TypedDict):
 
     url: str
     delivery_mode: str  # 'dm' or 'channel'
+
+
+def _display_filename(channel: discord.abc.Messageable) -> str:
+    """Human-facing zip filename like ``channel-general-2026-05-09.zip``.
+
+    Falls back to ``id-<n>`` for DMs and channels without a name. Strips
+    path separators and shell-grief characters.
+    """
+    raw_name = getattr(channel, "name", None) or f"id-{channel.id}"
+    safe_name = re.sub(r'[\\/:*?"<>|\s]+', "-", raw_name).strip("-")
+    return f"channel-{safe_name or 'unnamed'}-{date.today().isoformat()}.zip"
 
 
 @broker.task(
@@ -112,7 +124,7 @@ async def download_channel_media(
             archive_url = await storage.upload_and_sign(
                 name=key,
                 data=stream,
-                ttl=ttl,
+                download_filename=_display_filename(channel),
             )
             upload_succeeded = True
         finally:

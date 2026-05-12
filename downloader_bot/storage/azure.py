@@ -3,9 +3,10 @@
 from collections.abc import AsyncIterable
 from datetime import UTC, datetime, timedelta
 from typing import IO
+from urllib import parse
 
 from azure.core.exceptions import AzureError, ResourceNotFoundError
-from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+from azure.storage.blob import BlobSasPermissions, ContentSettings, generate_blob_sas
 from azure.storage.blob.aio import BlobClient, ContainerClient
 
 from downloader_bot.config import settings
@@ -14,11 +15,43 @@ from downloader_bot.storage.exceptions import SignedUrlError, UploadError
 
 
 def _build_client() -> ContainerClient:
-    """Build a ContainerClient from the centralised settings object."""
+    """Build a ContainerClient tuned for long streaming uploads.
+
+    Defaults bumped from Azure SDK's stock values:
+    - read_timeout: 60s -> 600s. A single Put Block on a multi-GB stream
+      can legitimately take minutes; the default falsely surfaces slow
+      backends as failures.
+    - retry_total: 10 -> 5. We don't want 10 retries on a permanent
+      failure prolonging worker-side cleanup; 5 is plenty for transients.
+    - retry_backoff_max: 120s left at default — caps how long any single
+      retry waits.
+    """
     return ContainerClient.from_connection_string(
         conn_str=settings.AZURE_CONN_STR,
         container_name=settings.AZURE_CONTAINER,
+        connection_timeout=20,
+        read_timeout=600,
+        retry_total=5,
+        retry_connect=3,
+        retry_read=3,
+        retry_status=3,
     )
+
+
+def _format_content_disposition(filename: str) -> str:
+    """Build a Content-Disposition value that browsers honour for any filename.
+
+    RFC 6266 + RFC 5987: emit ``filename="..."`` with ASCII fallback for
+    legacy clients, and ``filename*=UTF-8''...`` for the real value.
+    Modern browsers prefer the starred form when both are present.
+    """
+    try:
+        filename.encode("ascii")
+        return f'attachment; filename="{filename}"'
+    except UnicodeEncodeError:
+        ascii_fallback = filename.encode("ascii", "replace").decode("ascii")
+        encoded = parse.quote(filename, safe="")
+        return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 class AzureBlobBackend(StorageBackend):
@@ -58,8 +91,10 @@ class AzureBlobBackend(StorageBackend):
         name: str,
         data: bytes | IO[bytes] | AsyncIterable[bytes],
         *,
-        ttl: timedelta = timedelta(hours=1),
+        ttl: timedelta = timedelta(hours=24),
         overwrite: bool = True,
+        content_type: str | None = None,
+        download_filename: str | None = None,
     ) -> str:
         """Upload ``data`` under key ``name`` and return a SAS URL valid for ``ttl``.
 
@@ -84,6 +119,9 @@ class AzureBlobBackend(StorageBackend):
                 name=name,
                 data=data,
                 overwrite=overwrite,
+                content_settings=ContentSettings(
+                    content_type=content_type or "application/zip",
+                ),
             )
         except AzureError as e:
             raise UploadError(
@@ -92,16 +130,23 @@ class AzureBlobBackend(StorageBackend):
             ) from e
 
         now = datetime.now(UTC)
-        try:
-            sas_token = generate_blob_sas(
-                account_name=self.con_client.account_name,
-                container_name=self.con_client.container_name,
-                blob_name=blob_client.blob_name,
-                account_key=credential.account_key,
-                permission=BlobSasPermissions(read=True),
-                start=now,
-                expiry=now + ttl,
+
+        sas_kwargs = {
+            "account_name": self.con_client.account_name,
+            "container_name": self.con_client.container_name,
+            "blob_name": blob_client.blob_name,
+            "account_key": credential.account_key,
+            "permission": BlobSasPermissions(read=True),
+            "start": now,
+            "expiry": now + ttl,
+        }
+        if download_filename is not None:
+            # Adds rscd= to the SAS, overriding Content-Disposition on response.
+            sas_kwargs["content_disposition"] = _format_content_disposition(
+                download_filename
             )
+        try:
+            sas_token = generate_blob_sas(**sas_kwargs)
         except AzureError as e:
             raise SignedUrlError(
                 f"Failed to generate SAS token for blob '{blob_client.blob_name}': {e}"

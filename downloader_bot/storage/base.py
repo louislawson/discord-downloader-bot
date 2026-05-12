@@ -25,10 +25,16 @@ class StorageBackend(ABC):
         name: str,
         data: bytes | IO[bytes] | AsyncIterable[bytes],
         *,
-        ttl: timedelta = timedelta(hours=1),
+        ttl: timedelta = timedelta(hours=24),
         overwrite: bool = True,
+        content_type: str | None = None,
+        download_filename: str | None = None,
     ) -> str:
         """Upload ``data`` under key ``name`` and return a pre-signed URL.
+
+        download_filename: when set, the SAS URL includes a
+            Content-Disposition response override so browsers save the
+            download under this name. Encoded per RFC 5987 for non-ASCII.
 
         Raises:
             UploadError: upload step failed.
