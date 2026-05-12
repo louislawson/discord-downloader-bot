@@ -1,8 +1,14 @@
-"""Branch tests for the /download cog — enqueue/ack happy path + error embeds."""
+"""Branch tests for the /download cog.
 
-from unittest.mock import AsyncMock
+Patches ``download_channel_media.kiq`` at the import site so the cog's
+enqueue path is exercised without a live broker. The actual task body
+is tested in ``tests/tasks/test_download.py``.
+"""
 
-from downloader_bot.cogs.download import Download
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from app.cogs.download import Download
 
 
 async def _invoke(cog, ctx, only_me=False):
@@ -14,28 +20,122 @@ def _last_embed(ctx):
     return ctx.send.await_args.kwargs["embed"]
 
 
-class TestArqPoolUnavailable:
-    async def test_arq_pool_none_returns_service_unavailable(
+@pytest.fixture
+def mock_kiq(mocker):
+    """Patch ``download_channel_media.kiq`` and return the AsyncMock."""
+    fake_task = MagicMock(task_id="task-abc")
+    return mocker.patch(
+        "app.cogs.download.download_channel_media.kiq",
+        new_callable=AsyncMock,
+        return_value=fake_task,
+    )
+
+
+class TestPermissionPrecheck:
+    async def test_missing_read_message_history_fails_fast(
         self,
         mock_bot,
         mock_context,
+        mock_kiq,
     ):
-        mock_bot.arq_pool = None
+        # Flip read_message_history off — cog should bail before .kiq.
+        perms = MagicMock()
+        perms.read_message_history = False
+        mock_context.channel.permissions_for = MagicMock(return_value=perms)
         cog = Download(mock_bot)
 
         await _invoke(cog, mock_context)
 
         mock_context.defer.assert_awaited_once()
-        mock_context.send.assert_awaited_once()
-        assert _last_embed(mock_context).title == "Service unavailable"
+        mock_kiq.assert_not_awaited()
+        assert _last_embed(mock_context).title == "Missing permission"
 
-    async def test_enqueue_raises_returns_service_unavailable(
+    async def test_passes_through_when_permission_granted(
         self,
         mock_bot,
         mock_context,
+        mock_kiq,
     ):
-        mock_bot.arq_pool.enqueue_job = AsyncMock(
-            side_effect=RuntimeError("redis gone")
+        # Default mock_context fixture sets read_message_history=True.
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        mock_kiq.assert_awaited_once()
+
+
+class TestEnqueueHappyPath:
+    async def test_enqueues_with_typed_kwargs_and_acks(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, only_me=False)
+
+        mock_kiq.assert_awaited_once()
+        # Taskiq uses typed kwargs, not a payload dict.
+        assert mock_kiq.await_args.kwargs == {
+            "channel_id": 555,
+            "user_id": 42,
+            "guild_id": 12345,
+            "only_me": False,
+        }
+        embed = _last_embed(mock_context)
+        assert embed.title == "Download queued"
+        # Task id propagates into the embed footer for user-side troubleshooting.
+        assert "task-abc" in embed.footer.text
+
+
+class TestOnlyMe:
+    async def test_only_me_propagates_and_makes_ack_ephemeral(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, only_me=True)
+
+        # defer + send both pass ephemeral=True.
+        assert mock_context.defer.await_args.kwargs == {"ephemeral": True}
+        assert mock_context.send.await_args.kwargs["ephemeral"] is True
+        # Task receives only_me=True.
+        assert mock_kiq.await_args.kwargs["only_me"] is True
+
+
+class TestDmContext:
+    async def test_dm_context_passes_guild_id_none(
+        self,
+        mock_bot,
+        dm_context,
+        mock_kiq,
+    ):
+        # In a DM channel, context.guild is None — the cog must not
+        # try to look up read_message_history on a None guild.me, and
+        # must pass guild_id=None to the task.
+        cog = Download(mock_bot)
+
+        await _invoke(cog, dm_context)
+
+        assert mock_kiq.await_args.kwargs["guild_id"] is None
+
+
+class TestBrokerUnavailable:
+    async def test_kiq_raises_surfaces_service_unavailable_embed(
+        self,
+        mock_bot,
+        mock_context,
+        mocker,
+    ):
+        # RabbitMQ went away between bot startup and command invocation.
+        mocker.patch(
+            "app.cogs.download.download_channel_media.kiq",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("rabbitmq gone"),
         )
         cog = Download(mock_bot)
 
@@ -44,64 +144,21 @@ class TestArqPoolUnavailable:
         mock_bot.logger.exception.assert_called_once()
         assert _last_embed(mock_context).title == "Service unavailable"
 
-
-class TestEnqueueHappyPath:
-    async def test_enqueues_with_payload_and_acks_blurple(
+    async def test_broker_down_with_only_me_keeps_response_ephemeral(
         self,
         mock_bot,
         mock_context,
+        mocker,
     ):
-        cog = Download(mock_bot)
-
-        await _invoke(cog, mock_context, only_me=False)
-
-        mock_bot.arq_pool.enqueue_job.assert_awaited_once()
-        call = mock_bot.arq_pool.enqueue_job.await_args
-        assert call.args[0] == "download_channel_media"
-        payload = call.args[1]
-        assert payload["channel_id"] == 555
-        assert payload["guild_id"] == 12345
-        assert payload["requester_id"] == 42
-        assert payload["only_me"] is False
-        assert payload["allowed_media_types"] == [
-            "image/png",
-            "image/jpeg",
-            "video/mp4",
-        ]
-        # Job id passed as keyword argument and matches the payload field.
-        assert call.kwargs["_job_id"] == payload["job_id"]
-
-        assert _last_embed(mock_context).title == "Download queued"
-
-
-class TestOnlyMe:
-    async def test_only_me_propagates_into_payload_and_ephemeral_flags(
-        self,
-        mock_bot,
-        mock_context,
-    ):
+        mocker.patch(
+            "app.cogs.download.download_channel_media.kiq",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("rabbitmq gone"),
+        )
         cog = Download(mock_bot)
 
         await _invoke(cog, mock_context, only_me=True)
 
-        # Defer was called with ephemeral=True
-        assert mock_context.defer.await_args.kwargs == {"ephemeral": True}
-        # Payload propagates only_me
-        payload = mock_bot.arq_pool.enqueue_job.await_args.args[1]
-        assert payload["only_me"] is True
-        # Ack send is also ephemeral
+        # Error embed is still hidden from the channel — user-requested
+        # privacy preserved even on the failure path.
         assert mock_context.send.await_args.kwargs["ephemeral"] is True
-
-
-class TestDmContext:
-    async def test_dm_context_payload_guild_id_is_none(
-        self,
-        mock_bot,
-        dm_context,
-    ):
-        cog = Download(mock_bot)
-
-        await _invoke(cog, dm_context)
-
-        payload = mock_bot.arq_pool.enqueue_job.await_args.args[1]
-        assert payload["guild_id"] is None

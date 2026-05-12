@@ -5,3 +5,4 @@ pytest-cov==6.3.0
 pytest-mock==3.15.1
 ruff==0.14.4
 pre-commit==4.4.0
+fakeredis[asyncio]>=2.20
