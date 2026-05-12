@@ -6,7 +6,6 @@ import platform
 import asyncpg
 import discord
 import discordhealthcheck
-from arq.connections import ArqRedis
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
 
@@ -15,7 +14,6 @@ from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
 from downloader_bot.embeds import error
 from downloader_bot.logging_setup import init_logger
 from downloader_bot.presence import STATUSES, cycle_random
-from downloader_bot.queue_client import open_pool
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -49,7 +47,6 @@ class DiscordBot(commands.Bot):
         self.bot_prefix = settings.PREFIX
         self.invite_link = settings.INVITE_LINK
         self.healthcheck_server = None
-        self.arq_pool: ArqRedis | None = None
         self.db_pool: asyncpg.Pool | None = None
         self._status_picker = cycle_random(STATUSES)
 
@@ -101,13 +98,10 @@ class DiscordBot(commands.Bot):
         self.logger.info("Connected to Postgres")
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
-        self.arq_pool = await open_pool()
         self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
         self.status_task.start()
 
     async def close(self):
-        if self.arq_pool is not None:
-            await self.arq_pool.aclose()
         if self.db_pool is not None:
             await self.db_pool.close()
         if self.healthcheck_server is not None:

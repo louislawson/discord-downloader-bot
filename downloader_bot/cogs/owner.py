@@ -4,7 +4,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from downloader_bot.embeds import error, info, success
+from downloader_bot.embeds import error, info
 
 _VALID_SCOPES = ("global", "guild")
 
@@ -87,40 +87,6 @@ class Owner(commands.Cog, name="owner"):
                 description="Slash commands have been synchronized in this guild.",
             )
             await context.send(embed=embed)
-
-    @commands.command(
-        name="queueping",
-        description="Smoke-test the work queue by enqueueing a noop job.",
-    )
-    @commands.is_owner()
-    async def queueping(self, context: Context) -> None:
-        """
-        Enqueue a noop job for round-trip verification of the work queue.
-
-        Args:
-            context (Context): The command context.
-        """
-        if self.bot.arq_pool is None:
-            embed = error(
-                title="Queue error",
-                description="Queue is not connected — Redis pool is unavailable.",
-            )
-            await context.send(embed=embed)
-            return
-
-        job = await self.bot.arq_pool.enqueue_job(
-            "noop_job",
-            {
-                "author": str(context.author),
-                "author_id": context.author.id,
-                "channel_id": context.channel.id,
-            },
-        )
-        embed = success(
-            title="Queue successful",
-            description=f"Enqueued `noop_job` (job_id `{job.job_id}`). Check the worker logs to confirm it ran.",
-        )
-        await context.send(embed=embed)
 
 
 async def setup(bot) -> None:
