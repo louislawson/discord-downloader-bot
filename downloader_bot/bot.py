@@ -10,7 +10,6 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
 
 from downloader_bot.config import settings
-from downloader_bot.db.pool import init_schema, open_pool as open_db_pool
 from downloader_bot.embeds import error
 from downloader_bot.logging_setup import init_logger
 from downloader_bot.presence import STATUSES, cycle_random
@@ -93,17 +92,12 @@ class DiscordBot(commands.Bot):
             "Running on: %s %s (%s)", platform.system(), platform.release(), os.name
         )
         self.logger.info("-------------------")
-        self.db_pool = await open_db_pool()
-        await init_schema(self.db_pool)
-        self.logger.info("Connected to Postgres")
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
         self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
         self.status_task.start()
 
     async def close(self):
-        if self.db_pool is not None:
-            await self.db_pool.close()
         if self.healthcheck_server is not None:
             await self.healthcheck_server.wait_closed()
         await super().close()

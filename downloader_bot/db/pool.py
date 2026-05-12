@@ -1,4 +1,9 @@
-"""Postgres connection pool shared by the bot and worker."""
+"""asyncpg pool factory + schema bootstrap.
+
+The schema is applied idempotently on pool startup so dev and CI don't
+need a separate migration step. Production should still own migrations
+explicitly (Alembic or similar) once the schema starts changing.
+"""
 
 from pathlib import Path
 
@@ -6,22 +11,24 @@ import asyncpg
 
 from downloader_bot.config import settings
 
-_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+_SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 
 
-async def open_pool() -> asyncpg.Pool:
-    """Open an ``asyncpg`` pool to the configured Postgres instance."""
-    return await asyncpg.create_pool(dsn=settings.POSTGRES_DSN)
-
-
-async def init_schema(pool: asyncpg.Pool) -> None:
-    """
-    Apply ``schema.sql`` idempotently.
-
-    Safe to call on every bot startup — the DDL uses ``CREATE TABLE IF NOT
-    EXISTS``. Avoids the overhead of a migration tool while there's only one
-    table to manage.
-    """
-    sql = _SCHEMA_PATH.read_text(encoding="utf-8")
+async def build_pool() -> asyncpg.Pool:
+    """Open the asyncpg pool and ensure the schema exists."""
+    pool = await asyncpg.create_pool(
+        dsn=settings.DATABASE_URL,
+        min_size=1,
+        max_size=10,
+    )
+    assert (
+        pool is not None
+    )  # asyncpg returns Optional in typeshed; never None in practice
     async with pool.acquire() as conn:
-        await conn.execute(sql)
+        await conn.execute(_SCHEMA_SQL.read_text())
+    return pool
+
+
+async def close_pool(pool: asyncpg.Pool) -> None:
+    """Release pool connections. Call at process shutdown."""
+    await pool.close()

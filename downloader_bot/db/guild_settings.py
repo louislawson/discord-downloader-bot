@@ -1,75 +1,77 @@
-"""Per-guild delivery settings backed by Postgres.
+"""GuildSettings dataclass + GuildSettingsRepo.
 
-Reads return ``('dm', None)`` for unknown or DM-context guilds so unconfigured
-servers still get a working delivery path without an explicit ``/setup`` run.
+Repository pattern: one class owns CRUD, no SQL leaks into the
+orchestrator. Defaults are baked into the dataclass — a guild without
+a row gets a default object without raising.
 """
 
-from typing import Literal
+from dataclasses import dataclass
+from datetime import datetime
 
 import asyncpg
 
-DeliveryMode = Literal["dm", "channel", "both"]
+
+@dataclass(frozen=True, slots=True)
+class GuildSettings:
+    guild_id: int
+    delivery_mode: str = "dm"  # 'dm' | 'channel'
+    results_channel_id: int | None = None
+    allowed_media_types: list[str] | None = None  # None = all
+    max_archive_size_bytes: int | None = None  # None = no cap
+    retention_hours: int = 24
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
-async def get(
-    pool: asyncpg.Pool,
-    guild_id: int | None,
-) -> tuple[DeliveryMode, int | None]:
-    """
-    Read delivery settings for ``guild_id``.
+class GuildSettingsRepo:
+    """CRUD for guild_settings. Constructed once per worker / bot process."""
 
-    Returns ``('dm', None)`` when ``guild_id`` is ``None`` (DM-context
-    invocation) or no row exists for the guild.
-    """
-    if guild_id is None:
-        return ("dm", None)
-    row = await pool.fetchrow(
-        "SELECT delivery_mode, results_channel_id FROM guild_settings "
-        "WHERE guild_id = $1",
-        guild_id,
-    )
-    if row is None:
-        return ("dm", None)
-    return (row["delivery_mode"], row["results_channel_id"])
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
 
+    async def get(self, guild_id: int) -> GuildSettings:
+        """Return settings for ``guild_id``. Missing row → defaults."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM guild_settings WHERE guild_id = $1",
+                guild_id,
+            )
+        if row is None:
+            return GuildSettings(guild_id=guild_id)
+        return GuildSettings(
+            guild_id=row["guild_id"],
+            delivery_mode=row["delivery_mode"],
+            results_channel_id=row["results_channel_id"],
+            allowed_media_types=list(row["allowed_media_types"])
+            if row["allowed_media_types"] is not None
+            else None,
+            max_archive_size_bytes=row["max_archive_size_bytes"],
+            retention_hours=row["retention_hours"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
-async def set_mode(
-    pool: asyncpg.Pool,
-    guild_id: int,
-    mode: DeliveryMode,
-) -> None:
-    """Upsert ``delivery_mode`` for ``guild_id``; preserves any existing channel."""
-    await pool.execute(
-        "INSERT INTO guild_settings (guild_id, delivery_mode) "
-        "VALUES ($1, $2) "
-        "ON CONFLICT (guild_id) DO UPDATE "
-        "SET delivery_mode = EXCLUDED.delivery_mode, updated_at = now()",
-        guild_id,
-        mode,
-    )
-
-
-async def set_channel(
-    pool: asyncpg.Pool,
-    guild_id: int,
-    channel_id: int,
-) -> None:
-    """Upsert ``results_channel_id`` for ``guild_id``; mode defaults to 'dm' on first insert."""
-    await pool.execute(
-        "INSERT INTO guild_settings (guild_id, results_channel_id) "
-        "VALUES ($1, $2) "
-        "ON CONFLICT (guild_id) DO UPDATE "
-        "SET results_channel_id = EXCLUDED.results_channel_id, updated_at = now()",
-        guild_id,
-        channel_id,
-    )
-
-
-async def clear_channel(pool: asyncpg.Pool, guild_id: int) -> None:
-    """Clear the configured results channel for ``guild_id`` (no-op if no row)."""
-    await pool.execute(
-        "UPDATE guild_settings "
-        "SET results_channel_id = NULL, updated_at = now() "
-        "WHERE guild_id = $1",
-        guild_id,
-    )
+    async def upsert(self, settings: GuildSettings) -> None:
+        """Insert-or-update — used by the `/setup` cog."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO guild_settings (
+                    guild_id, delivery_mode, results_channel_id,
+                    allowed_media_types, max_archive_size_bytes, retention_hours
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    delivery_mode = EXCLUDED.delivery_mode,
+                    results_channel_id = EXCLUDED.results_channel_id,
+                    allowed_media_types = EXCLUDED.allowed_media_types,
+                    max_archive_size_bytes = EXCLUDED.max_archive_size_bytes,
+                    retention_hours = EXCLUDED.retention_hours,
+                    updated_at = now()
+                """,
+                settings.guild_id,
+                settings.delivery_mode,
+                settings.results_channel_id,
+                settings.allowed_media_types,
+                settings.max_archive_size_bytes,
+                settings.retention_hours,
+            )
