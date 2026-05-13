@@ -4,6 +4,8 @@ import logging
 
 import discord
 
+from downloader_bot.embeds import media_download
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +24,12 @@ async def dm_user(
 ) -> None:
     user = await client.fetch_user(user_id)
     try:
-        await user.send(f"Your channel archive is ready: {archive_url}")
+        await user.send(
+            embed=media_download(
+                signed_url=archive_url,
+                requester_id=user_id,
+            )
+        )
     except discord.Forbidden as exc:
         raise DMUnavailable(f"cannot DM user {user_id}") from exc
 
@@ -46,7 +53,10 @@ async def post_to_channel(
         if not isinstance(channel, discord.abc.Messageable):
             raise TypeError(f"channel {channel_id} is not messageable")
         await channel.send(
-            f"<@{fallback_user_id}> your channel archive is ready: {archive_url}"
+            embed=media_download(
+                signed_url=archive_url,
+                requester_id=fallback_user_id,
+            )
         )
     except (discord.NotFound, discord.Forbidden, TypeError) as exc:
         logger.warning(

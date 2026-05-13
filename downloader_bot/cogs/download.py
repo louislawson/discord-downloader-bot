@@ -8,28 +8,12 @@ Discord interaction-token window and lets independent channels run in
 parallel.
 """
 
-import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 from taskiq import AsyncTaskiqTask
 
-from downloader_bot.embeds import error, info
+from downloader_bot.embeds import error, job_enqueued
 from downloader_bot.tasks.download import DownloadResult, download_channel_media
-
-
-def _queued_embed(task_id: str, only_me: bool) -> discord.Embed:
-    """Blurple ack shown immediately after enqueueing the task."""
-    embed = info(
-        title="Download queued",
-        description=(
-            "Your download has been queued. The result will be sent to "
-            "you via DM once it's ready."
-            if only_me
-            else "Your download has been queued. You'll be notified once it's ready."
-        ),
-    )
-    embed.set_footer(text=f"Job {task_id}")
-    return embed
 
 
 class Download(commands.Cog, name="download"):
@@ -103,7 +87,7 @@ class Download(commands.Cog, name="download"):
         )
 
         await context.send(
-            embed=_queued_embed(task.task_id, only_me),
+            embed=job_enqueued(task_id=task.task_id, only_me=only_me),
             ephemeral=only_me,
         )
 
