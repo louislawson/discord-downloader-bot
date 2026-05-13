@@ -21,7 +21,7 @@ services:
     image: louislawson/downloader-bot:latest-arm64-v8
     env_file:
       - .env
-    command: [ "python", "-m", "taskiq", "worker", "-fsd", "-tp", "bot/tasks/*.py", "-tp", "bot/tasks/**/*.py", "downloader_bot.tq:broker" ]
+    command: [ "python", "-m", "taskiq", "worker", "downloader_bot.tq:broker", "downloader_bot.tasks" ]
     environment:
       - TASKIQ_PROCESS_ROLE=worker
     depends_on:
@@ -42,7 +42,7 @@ services:
     image: louislawson/downloader-bot:latest-arm64-v8
     env_file:
       - .env
-    command: [ "python", "-m", "taskiq", "scheduler", "-fsd", "-tp", "bot/tasks/*.py", "-tp", "bot/tasks/**/*.py", "downloader_bot.tq:scheduler" ]
+    command: [ "python", "-m", "taskiq", "scheduler", "downloader_bot.tq:scheduler", "downloader_bot.tasks" ]
     environment:
       - TASKIQ_PROCESS_ROLE=scheduler
     depends_on:
