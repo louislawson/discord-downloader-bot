@@ -23,9 +23,9 @@ class TestDmUser:
 
         mock_discord_client.fetch_user.assert_awaited_once_with(42)
         user_mock.send.assert_awaited_once()
-        # URL appears verbatim in the message body.
-        body = user_mock.send.await_args.args[0]
-        assert "https://x/signed?sas" in body
+        # URL appears verbatim in the embed description.
+        embed = user_mock.send.await_args.kwargs["embed"]
+        assert "https://x/signed?sas" in embed.description
 
     async def test_forbidden_raises_dm_unavailable(
         self,
@@ -74,9 +74,9 @@ class TestPostToChannel:
 
         mock_discord_client.fetch_channel.assert_awaited_once_with(999)
         channel_mock.send.assert_awaited_once()
-        body = channel_mock.send.await_args.args[0]
-        assert "<@42>" in body
-        assert "https://x/signed" in body
+        embed = channel_mock.send.await_args.kwargs["embed"]
+        assert "<@42>" in embed.footer.text
+        assert "https://x/signed" in embed.description
 
     async def test_non_messageable_falls_back_to_dm(
         self,
