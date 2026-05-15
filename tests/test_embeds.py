@@ -5,8 +5,8 @@ Coverage targets the regressions hit during review:
 * Each factory's colour / author / timestamp shape.
 * Timestamp is UTC-aware (not local time).
 * Timestamp is evaluated on each call, not at import time.
-* ``media_download`` field order and labels (Images then Videos, not "Images"
-  twice).
+* ``media_download`` description carries the signed URL and the footer
+  mentions the requester.
 """
 
 from datetime import UTC, datetime
@@ -78,24 +78,14 @@ class TestMediaDownload:
     def embed(self):
         return embeds.media_download(
             signed_url="https://example.invalid/x.zip?token=abc",
-            image_count=3,
-            video_count=5,
-            requester="alice#0001",
+            requester_id=42,
         )
-
-    def test_field_names_and_order(self, embed):
-        # A previous refactor mislabelled the Videos field as "Images"; pin
-        # both labels and their order.
-        assert [(f.name, f.value) for f in embed.fields] == [
-            ("Images", "3"),
-            ("Videos", "5"),
-        ]
 
     def test_description_contains_signed_url(self, embed):
         assert "https://example.invalid/x.zip?token=abc" in embed.description
 
-    def test_footer_includes_requester(self, embed):
-        assert embed.footer.text == "Requested by alice#0001"
+    def test_footer_mentions_requester(self, embed):
+        assert "<@42>" in embed.footer.text
 
     def test_inherits_success_colour_and_author(self, embed):
         assert embed.colour == discord.Color.green()

@@ -26,7 +26,7 @@ def mock_kiq(mocker):
     """Patch ``download_channel_media.kiq`` and return the AsyncMock."""
     fake_task = MagicMock(task_id="task-abc")
     return mocker.patch(
-        "app.cogs.download.download_channel_media.kiq",
+        "downloader_bot.cogs.download.download_channel_media.kiq",
         new_callable=AsyncMock,
         return_value=fake_task,
     )
@@ -134,7 +134,7 @@ class TestBrokerUnavailable:
     ):
         # RabbitMQ went away between bot startup and command invocation.
         mocker.patch(
-            "app.cogs.download.download_channel_media.kiq",
+            "downloader_bot.cogs.download.download_channel_media.kiq",
             new_callable=AsyncMock,
             side_effect=RuntimeError("rabbitmq gone"),
         )
@@ -152,7 +152,7 @@ class TestBrokerUnavailable:
         mocker,
     ):
         mocker.patch(
-            "app.cogs.download.download_channel_media.kiq",
+            "downloader_bot.cogs.download.download_channel_media.kiq",
             new_callable=AsyncMock,
             side_effect=RuntimeError("rabbitmq gone"),
         )
