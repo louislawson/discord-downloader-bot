@@ -1,4 +1,4 @@
-"""Branch tests for the /setup cog — per-guild config writes."""
+"""Branch tests for the /setup cog — per-guild config reads & writes."""
 
 from unittest.mock import MagicMock
 
@@ -7,10 +7,22 @@ from downloader_bot.db.guild_settings import GuildSettings
 
 
 async def _invoke(cog, ctx, **kwargs):
-    """Call the cog's command callback directly, bypassing the decorators
+    """Call the ``set`` subcommand's callback directly, bypassing the decorators
     (incl. ``has_permissions``/``guild_only``, which are checked by
     discord.py's command pipeline, not the callback itself)."""
-    await cog.setup_cmd.callback(cog, ctx, **kwargs)
+    await cog.setup_set.callback(cog, ctx, **kwargs)
+
+
+async def _invoke_show(cog, ctx):
+    await cog.setup_show.callback(cog, ctx)
+
+
+async def _invoke_clear(cog, ctx):
+    await cog.setup_clear.callback(cog, ctx)
+
+
+async def _invoke_group(cog, ctx):
+    await cog.setup_group.callback(cog, ctx)
 
 
 def _last_embed(ctx):
@@ -125,3 +137,109 @@ class TestUpsert:
 
         embed = _last_embed(mock_context)
         assert "<#999>" in embed.description
+
+
+class TestShow:
+    async def test_returns_defaults_for_unconfigured_guild(
+        self,
+        mock_bot,
+        mock_context,
+    ):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(guild_id=12345)
+        cog = Setup(mock_bot)
+
+        await _invoke_show(cog, mock_context)
+
+        embed = _last_embed(mock_context)
+        assert embed.title == "Delivery settings"
+        assert "`dm`" in embed.description
+        assert "_not set_" in embed.description
+        assert "`24h`" in embed.description
+        assert mock_context.send.await_args.kwargs["ephemeral"] is True
+
+    async def test_renders_configured_settings(self, mock_bot, mock_context):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(
+            guild_id=12345,
+            delivery_mode="channel",
+            results_channel_id=999,
+            retention_hours=48,
+        )
+        cog = Setup(mock_bot)
+
+        await _invoke_show(cog, mock_context)
+
+        embed = _last_embed(mock_context)
+        assert "`channel`" in embed.description
+        assert "<#999>" in embed.description
+        assert "`48h`" in embed.description
+
+    async def test_show_does_not_upsert(self, mock_bot, mock_context):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(guild_id=12345)
+        cog = Setup(mock_bot)
+
+        await _invoke_show(cog, mock_context)
+
+        mock_bot.guild_settings_repo.upsert.assert_not_awaited()
+
+
+class TestClear:
+    async def test_resets_mode_and_channel(self, mock_bot, mock_context):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(
+            guild_id=12345,
+            delivery_mode="channel",
+            results_channel_id=999,
+            retention_hours=48,
+        )
+        cog = Setup(mock_bot)
+
+        await _invoke_clear(cog, mock_context)
+
+        mock_bot.guild_settings_repo.upsert.assert_awaited_once()
+        new_settings = mock_bot.guild_settings_repo.upsert.await_args.args[0]
+        assert new_settings.delivery_mode == "dm"
+        assert new_settings.results_channel_id is None
+        # Retention preserved across clear.
+        assert new_settings.retention_hours == 48
+
+    async def test_preserves_media_type_and_size_fields(
+        self,
+        mock_bot,
+        mock_context,
+    ):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(
+            guild_id=12345,
+            delivery_mode="channel",
+            results_channel_id=999,
+            allowed_media_types=["image/png", "image/jpeg"],
+            max_archive_size_bytes=10_000_000,
+        )
+        cog = Setup(mock_bot)
+
+        await _invoke_clear(cog, mock_context)
+
+        new_settings = mock_bot.guild_settings_repo.upsert.await_args.args[0]
+        assert new_settings.allowed_media_types == ["image/png", "image/jpeg"]
+        assert new_settings.max_archive_size_bytes == 10_000_000
+
+    async def test_success_ack_is_ephemeral(self, mock_bot, mock_context):
+        mock_bot.guild_settings_repo.get.return_value = GuildSettings(guild_id=12345)
+        cog = Setup(mock_bot)
+
+        await _invoke_clear(cog, mock_context)
+
+        assert _last_embed(mock_context).title == "Settings cleared"
+        assert mock_context.send.await_args.kwargs["ephemeral"] is True
+
+
+class TestGroupParent:
+    async def test_emits_usage_when_no_subcommand(self, mock_bot, mock_context):
+        mock_context.invoked_subcommand = None
+        cog = Setup(mock_bot)
+
+        await _invoke_group(cog, mock_context)
+
+        embed = _last_embed(mock_context)
+        assert embed.title == "Setup"
+        assert "set" in embed.description
+        assert "show" in embed.description
+        assert "clear" in embed.description

@@ -1,11 +1,23 @@
-"""Per-guild setup command.
+"""Per-guild setup commands.
 
-Server-owner-only. A single hybrid command that overwrites the guild's
-``delivery_mode`` / ``results_channel_id`` / ``retention_hours`` in one
-shot via ``GuildSettingsRepo.upsert``. ``allowed_media_types`` and
-``max_archive_size_bytes`` are left at their defaults until separate
-commands exist for them.
+Server-owner-only. A ``hybrid_group`` with three verbs:
+
+- ``set``   — overwrite ``delivery_mode`` / ``results_channel_id`` /
+              ``retention_hours`` in one shot via
+              ``GuildSettingsRepo.upsert``. ``allowed_media_types`` and
+              ``max_archive_size_bytes`` are left at their defaults
+              until separate commands exist for them.
+- ``show``  — print current effective settings (defaults are surfaced
+              for unconfigured guilds, since ``GuildSettingsRepo.get``
+              never returns ``None``).
+- ``clear`` — reset ``delivery_mode`` to ``dm`` and null the
+              ``results_channel_id``. Preserves ``retention_hours``,
+              ``allowed_media_types`` and ``max_archive_size_bytes``
+              (read-then-replace), so it can't be used as a backdoor
+              to wipe those columns.
 """
+
+from dataclasses import replace
 
 import discord
 from discord import app_commands
@@ -13,7 +25,7 @@ from discord.ext import commands
 from discord.ext.commands import Context, errors
 
 from downloader_bot.db.guild_settings import GuildSettings
-from downloader_bot.embeds import error, success
+from downloader_bot.embeds import error, info, success
 
 _VALID_MODES = ("dm", "channel")
 
@@ -41,18 +53,36 @@ class Setup(commands.Cog, name="setup"):
     def __init__(self, bot) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(
+    @commands.hybrid_group(
         name="setup",
         description="Configure download delivery for this server.",
     )
     @commands.guild_only()
     @_is_guild_owner()
+    async def setup_group(self, context: Context) -> None:
+        """Show usage when invoked without a subcommand (prefix invocation only)."""
+        if context.invoked_subcommand is None:
+            await context.send(
+                embed=info(
+                    title="Setup",
+                    description=(
+                        f"Use `{self.bot.bot_prefix}setup set | show | clear` "
+                        f"(or the `/setup` slash command)."
+                    ),
+                ),
+                ephemeral=True,
+            )
+
+    @setup_group.command(
+        name="set",
+        description="Overwrite this server's delivery settings.",
+    )
     @app_commands.describe(
         delivery_mode="`dm` = private DM to the requester | `channel` = post in the configured channel",
         results_channel="Required for `channel` mode — where results get posted.",
         retention_hours="How many hours generated download links remain valid (default 24).",
     )
-    async def setup_cmd(
+    async def setup_set(
         self,
         context: Context,
         delivery_mode: str,
@@ -120,6 +150,56 @@ class Setup(commands.Cog, name="setup"):
                     f"**Channel:** {channel_str}\n"
                     f"**Retention:** `{retention_hours}h`"
                 ),
+            ),
+            ephemeral=True,
+        )
+
+    @setup_group.command(
+        name="show",
+        description="Show current delivery settings.",
+    )
+    async def setup_show(self, context: Context) -> None:
+        """Display current effective delivery settings for this guild."""
+        settings = await self.bot.guild_settings_repo.get(context.guild.id)
+        channel_str = (
+            f"<#{settings.results_channel_id}>"
+            if settings.results_channel_id is not None
+            else "_not set_"
+        )
+        await context.send(
+            embed=info(
+                title="Delivery settings",
+                description=(
+                    f"**Mode:** `{settings.delivery_mode}`\n"
+                    f"**Channel:** {channel_str}\n"
+                    f"**Retention:** `{settings.retention_hours}h`"
+                ),
+            ),
+            ephemeral=True,
+        )
+
+    @setup_group.command(
+        name="clear",
+        description="Reset delivery to DM and unset the results channel.",
+    )
+    async def setup_clear(self, context: Context) -> None:
+        """Reset delivery to ``dm`` and null the results channel.
+
+        Retention and (currently-unused) media-type / size-cap fields are
+        preserved via read-then-replace so this isn't a backdoor wipe.
+        """
+        existing = await self.bot.guild_settings_repo.get(context.guild.id)
+        await self.bot.guild_settings_repo.upsert(
+            replace(
+                existing,
+                delivery_mode="dm",
+                results_channel_id=None,
+            ),
+        )
+        await context.send(
+            embed=success(
+                title="Settings cleared",
+                description="Delivery mode reset to `dm` and results channel cleared.",
             ),
             ephemeral=True,
         )
