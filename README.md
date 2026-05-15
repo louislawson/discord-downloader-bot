@@ -7,7 +7,10 @@ The bot itself only enqueues Taskiq tasks — a separate Taskiq worker (same ima
 ## Commands
 
 - **`/download [only_me]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. Set `only_me: true` to force private DM delivery (overrides the server's configured mode).
-- **`/setup delivery_mode [results_channel] [retention_hours]`** — Server-owner only. Overwrites delivery settings for this guild in one shot. `delivery_mode=dm` sends to the requester; `delivery_mode=channel` posts in `results_channel` (required for that mode) and falls back to DM if the channel is unusable at delivery time. `retention_hours` controls SAS URL lifetime (default `24`).
+- **`/setup set | show | clear`** — Server-owner only.
+  - `/setup set <delivery_mode> [results_channel] [retention_hours]` overwrites delivery settings in one shot. `delivery_mode=dm` sends to the requester; `delivery_mode=channel` posts in `results_channel` (required for that mode) and falls back to DM if the channel is unusable at delivery time. `retention_hours` controls SAS URL lifetime (default `24`).
+  - `/setup show` prints this guild's current effective settings.
+  - `/setup clear` resets `delivery_mode` to `dm` and unsets the results channel. `retention_hours` and the (currently-unused) media-type / size-cap fields are preserved.
 - **`/invite`** — DMs the requester the bot's invite link (configured via `INVITE_LINK`); falls back to an ephemeral channel reply if DMs are blocked.
 - **`<PREFIX>sync global|guild`** — Bot-owner only, prefix-only. Re-registers slash commands. Run this after deploying new commands.
 
