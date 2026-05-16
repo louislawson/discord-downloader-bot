@@ -35,7 +35,17 @@ class NotGuildOwner(commands.CheckFailure):
 
 
 def _is_guild_owner():
-    """Check that succeeds only for the guild owner. Raises in DMs too."""
+    """Build a discord.py check that succeeds only for the guild owner.
+
+    The inner predicate raises ``NotGuildOwner`` rather than returning
+    ``False`` so the cog-local error handler can format a tailored embed
+    (a plain ``False`` would surface as a generic ``CheckFailure``). It
+    also raises ``NoPrivateMessage`` in DMs.
+
+    Returns:
+        A ``commands.check(...)`` decorator suitable for stacking on a
+        cog command or group.
+    """
 
     async def predicate(context: Context) -> bool:
         if context.guild is None:
@@ -51,6 +61,7 @@ class Setup(commands.Cog, name="setup"):
     """Per-guild configuration commands."""
 
     def __init__(self, bot) -> None:
+        """Bind the cog to its parent bot."""
         self.bot = bot
 
     @commands.hybrid_group(
@@ -209,12 +220,15 @@ class Setup(commands.Cog, name="setup"):
         context: Context,
         cmd_error: errors.CommandError,
     ) -> None:
-        """
-        Handle setup-specific errors before the global handler sees them.
+        """Handle setup-specific errors before the global handler sees them.
 
-        ``NotGuildOwner`` and ``NoPrivateMessage`` get a tailored message; all
-        other errors re-raise so the global handler in [bot.py](bot.py)
-        formats them.
+        ``NotGuildOwner`` and ``NoPrivateMessage`` get a tailored message;
+        all other errors re-raise so the global handler in
+        [bot.py](../bot.py) formats them.
+
+        Args:
+            context: The command context.
+            cmd_error: The error raised by a setup subcommand.
         """
         if isinstance(cmd_error, NotGuildOwner):
             await context.send(

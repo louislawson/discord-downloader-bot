@@ -1,3 +1,16 @@
+"""Taskiq broker, scheduler, cancellation backend and typed dependency providers.
+
+Single source of truth for the queue infrastructure shared between the bot
+(publishes tasks) and the Taskiq worker / scheduler (consume / schedule).
+
+The ``WORKER_STARTUP`` hook attaches shared resources (discord REST client,
+aiohttp session, storage backend, asyncpg pool, repo, Redis) to the per-worker
+``state``. Tasks should read those via the typed providers below
+(``get_storage``, ``get_redis``, etc.) rather than touching ``context.state``
+directly — providers give the type checker the right type and let tests pass
+plain mocks.
+"""
+
 from contextlib import AsyncExitStack
 from typing import Annotated
 
@@ -47,6 +60,11 @@ broker = (
 
 @broker.on_event(TaskiqEvents.WORKER_STARTUP)
 async def _on_worker_startup(state) -> None:
+    """Open per-worker shared resources and attach them to ``state``.
+
+    Anything stashed here must have a matching typed provider below so tasks
+    can declare it via ``Annotated[T, TaskiqDepends(provider)]``.
+    """
     state.discord_client = await open_client(settings.TOKEN)
     # Separate session for streaming attachment downloads. We don't reuse
     # discord.py's HTTPClient session because we need direct
@@ -67,6 +85,7 @@ async def _on_worker_startup(state) -> None:
 
 @broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
 async def _on_worker_shutdown(state) -> None:
+    """Release per-worker shared resources in reverse order of startup."""
     await state.exit_stack.aclose()
     await state.download_session.close()
     await close_client(state.discord_client)
@@ -86,35 +105,71 @@ async def _on_worker_shutdown(state) -> None:
 def get_discord_client(
     context: Annotated[Context, TaskiqDepends()],
 ) -> discord.Client:
-    """Provider for the worker-shared discord.py REST client."""
+    """Return the worker-shared discord.py REST client.
+
+    Args:
+        context: Injected Taskiq context.
+
+    Returns:
+        The REST-only ``discord.Client`` opened in ``WORKER_STARTUP``.
+    """
     return context.state.discord_client
 
 
 def get_download_session(
     context: Annotated[Context, TaskiqDepends()],
 ) -> aiohttp.ClientSession:
-    """Provider for the worker-shared aiohttp session used by zip_stream."""
+    """Return the worker-shared aiohttp session used by the zip pipeline.
+
+    Args:
+        context: Injected Taskiq context.
+
+    Returns:
+        The ``aiohttp.ClientSession`` opened in ``WORKER_STARTUP``.
+    """
     return context.state.download_session
 
 
 def get_storage(
     context: Annotated[Context, TaskiqDepends()],
 ) -> StorageBackend:
-    """Provider for the worker-shared storage backend."""
+    """Return the worker-shared storage backend.
+
+    Args:
+        context: Injected Taskiq context.
+
+    Returns:
+        The storage backend entered into the worker's ``AsyncExitStack``.
+    """
     return context.state.storage
 
 
 def get_guild_settings_repo(
     context: Annotated[Context, TaskiqDepends()],
 ) -> GuildSettingsRepo:
-    """Provider for the worker-shared GuildSettingsRepo (asyncpg-backed)."""
+    """Return the worker-shared per-guild settings repo (asyncpg-backed).
+
+    Args:
+        context: Injected Taskiq context.
+
+    Returns:
+        The ``GuildSettingsRepo`` constructed in ``WORKER_STARTUP``.
+    """
     return context.state.guild_settings_repo
 
 
 def get_redis(
     context: Annotated[Context, TaskiqDepends()],
 ) -> Redis:
-    """Provider for the worker-shared Redis client (idempotency state)."""
+    """Return the worker-shared Redis client used for idempotency state.
+
+    Args:
+        context: Injected Taskiq context.
+
+    Returns:
+        The app-namespaced Redis client (distinct from the Taskiq result
+        backend's internal Redis).
+    """
     return context.state.redis
 
 

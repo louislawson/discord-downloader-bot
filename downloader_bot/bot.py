@@ -25,17 +25,10 @@ logger = init_logger("downloader_bot")
 
 
 class DiscordBot(commands.Bot):
-    """
-    Custom Discord Bot class.
+    """Custom Discord bot wrapping ``commands.Bot``.
 
-    This class overrides some of the base function of the discord.py Bot class
-    to provide better functionality for cogs, error handling, and logging.
-
-    Attributes:
-        logger (Logger): Logger instance for this bot.
-        bot_prefix (str): Bot command prefix.
-        invite_link (str): Bot invite link.
-        healthcheck_server (Server): Health check server instance.
+    Centralises cog auto-loading, lifecycle wiring (broker / pool / repo /
+    healthcheck / status loop), and command-error handling.
     """
 
     def __init__(self) -> None:
@@ -89,6 +82,13 @@ class DiscordBot(commands.Bot):
         await self.wait_until_ready()
 
     async def setup_hook(self) -> None:
+        """Initialise broker, DB pool, repo, cogs, healthcheck and status loop.
+
+        Runs once after login. Order matters: the broker has to start before
+        any cog can enqueue tasks, and the pool / repo have to exist before
+        any cog can read guild settings. ``broker.startup()`` is skipped on
+        the worker side via ``broker.is_worker_process``.
+        """
         self.logger.info("Logged in as %s", self.user.name)
         self.logger.info("discord.py API version: %s", discord.__version__)
         self.logger.info("Python version: %s", platform.python_version())
@@ -106,6 +106,11 @@ class DiscordBot(commands.Bot):
         self.status_task.start()
 
     async def close(self):
+        """Shut down healthcheck, broker, DB pool, then the discord.py client.
+
+        Mirror of :meth:`setup_hook`. ``broker.shutdown()`` is skipped on the
+        worker side (the worker owns its own broker lifecycle).
+        """
         if self.healthcheck_server is not None:
             await self.healthcheck_server.wait_closed()
         if not broker.is_worker_process:
@@ -116,22 +121,20 @@ class DiscordBot(commands.Bot):
 
     # pylint: disable=arguments-differ
     async def on_message(self, message: discord.Message) -> None:
-        """
-        Process commands from non-bot users.
+        """Process commands from non-bot users.
 
         Args:
-            message (Message): The message that was sent.
+            message: The message that was sent.
         """
         if message.author == self.user or message.author.bot:
             return
         await self.process_commands(message)
 
     async def on_command_completion(self, context: Context) -> None:
-        """
-        Log successfully executed commands.
+        """Log successfully executed commands.
 
         Args:
-            context (Context): The context of the command.
+            context: The context of the command.
         """
         executed_command = context.command.qualified_name.split(" ")[0]
         if context.guild is not None:
@@ -156,13 +159,16 @@ class DiscordBot(commands.Bot):
         context: Context,
         cmd_error: errors.CommandError,
     ) -> None:
-        """
-        Global command error handler. Sends a user-facing embed for known error
-        types and re-raises anything unexpected so it surfaces in logs.
+        """Translate known command errors into user-facing embeds.
+
+        Known error types (cooldown, missing perms, bad argument, etc.) get
+        a tailored embed; anything unexpected is logged with a traceback and
+        the user gets a generic "unexpected error" embed so internals don't
+        leak. ``CommandNotFound`` is silently ignored.
 
         Args:
-            context (Context): The context of the command.
-            cmd_error (CommandError): The error that was raised.
+            context: The context of the command.
+            cmd_error: The error that was raised.
         """
         if isinstance(cmd_error, commands.CommandOnCooldown):
             minutes, seconds = divmod(cmd_error.retry_after, 60)

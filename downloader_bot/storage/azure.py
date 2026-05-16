@@ -77,12 +77,21 @@ class AzureBlobBackend(StorageBackend):
     """
 
     def __init__(self, client: ContainerClient | None = None) -> None:
+        """Wrap an injected ``ContainerClient`` or build one from settings.
+
+        Args:
+            client: Optional pre-built client (used by unit tests). If
+                ``None``, one is built from ``settings`` via
+                :func:`_build_client`.
+        """
         self.con_client: ContainerClient = client or _build_client()
 
     async def __aenter__(self) -> "AzureBlobBackend":
+        """Enter the backend context; the SDK client is already open."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Close the underlying ``ContainerClient``."""
         await self.con_client.close()
         return False
 

@@ -22,6 +22,18 @@ async def dm_user(
     user_id: int,
     archive_url: str,
 ) -> None:
+    """DM the requester with the archive download embed.
+
+    Args:
+        client: REST-only discord.py client (worker-shared).
+        user_id: Discord user ID to DM.
+        archive_url: Pre-signed download URL surfaced in the embed.
+
+    Raises:
+        DMUnavailable: The user has DMs disabled or has blocked the bot
+            (``discord.Forbidden`` is wrapped to keep the storage / delivery
+            error surface backend-agnostic).
+    """
     user = await client.fetch_user(user_id)
     try:
         await user.send(

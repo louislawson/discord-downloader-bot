@@ -12,9 +12,15 @@ import discord
 
 
 async def open_client(token: str) -> discord.Client:
-    """Open a logged-in Discord client with no gateway connection.
+    """Open a logged-in Discord client without a gateway connection.
 
-    Pair with ``close_client`` at worker shutdown.
+    Pair with :func:`close_client` at worker shutdown.
+
+    Args:
+        token: Discord bot token.
+
+    Returns:
+        A logged-in ``discord.Client`` whose REST surface is ready for use.
     """
     client = discord.Client(intents=discord.Intents.none())
     await client.login(token)
@@ -22,5 +28,9 @@ async def open_client(token: str) -> discord.Client:
 
 
 async def close_client(client: discord.Client) -> None:
-    """Release the underlying HTTP session."""
+    """Release the underlying HTTP session.
+
+    Args:
+        client: The client returned by :func:`open_client`.
+    """
     await client.close()

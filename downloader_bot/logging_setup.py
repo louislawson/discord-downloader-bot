@@ -19,19 +19,11 @@ from downloader_bot.config import settings
 
 
 class LoggingFormatter(logging.Formatter):
-    """
-    Custom logging formatter for discord.py.
+    """ANSI-coloured ``logging.Formatter`` for the bot's terminal output.
 
-    Attributes:
-        black (str): black ANSI code.
-        red (str): red ANSI code.
-        green (str): green ANSI code.
-        yellow (str): yellow ANSI code.
-        blue (str): blue ANSI code.
-        gray (str): gray ANSI code.
-        reset (str): reset ANSI code.
-        bold (str): bold ANSI code.
-        COLORS (Dict[int, str]): Relates logging level to a colour/style.
+    The ``COLORS`` class-var maps ``logging`` levels to ANSI sequences;
+    :meth:`format` substitutes them into the format string and delegates
+    to a vanilla ``logging.Formatter`` for the actual record render.
     """
 
     # Colors
@@ -54,6 +46,7 @@ class LoggingFormatter(logging.Formatter):
     }
 
     def format(self, record):
+        """Render ``record`` with a level-coloured prefix."""
         log_color = self.COLORS[record.levelno]
         log_format = "(black){asctime}(reset) (levelcolor){levelname:<8}(reset) (green){name}(reset) {message}"
         log_format = log_format.replace("(black)", self.black + self.bold)

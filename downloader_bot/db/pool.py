@@ -15,7 +15,20 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 
 
 async def build_pool() -> asyncpg.Pool:
-    """Open the asyncpg pool and ensure the schema exists."""
+    """Open the asyncpg pool and apply ``schema.sql`` idempotently.
+
+    The schema is applied on every startup so dev / CI don't need a
+    separate migration step. Both the bot and the worker call this
+    concurrently — that's safe because every statement in ``schema.sql``
+    is ``IF NOT EXISTS`` or equivalent.
+
+    Returns:
+        A ready-to-use ``asyncpg.Pool`` (1-10 connections).
+
+    Raises:
+        asyncpg.exceptions.PostgresError: Pool creation or schema apply
+            failed.
+    """
     pool = await asyncpg.create_pool(
         dsn=settings.POSTGRES_DSN,
         min_size=1,
@@ -30,5 +43,9 @@ async def build_pool() -> asyncpg.Pool:
 
 
 async def close_pool(pool: asyncpg.Pool) -> None:
-    """Release pool connections. Call at process shutdown."""
+    """Release pool connections; call at process shutdown.
+
+    Args:
+        pool: The pool returned by :func:`build_pool`.
+    """
     await pool.close()

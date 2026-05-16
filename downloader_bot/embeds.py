@@ -12,19 +12,16 @@ def _base(
     colour: discord.Colour | None = None,
     url: str | None = None,
 ) -> discord.Embed:
-    """
-    Base Discord embed template.
-
-    Preconfigured with a timestamp.
+    """Build a base embed with a UTC timestamp and the bot's author block.
 
     Args:
-        title (str | None): Title of the embed.
-        description (str | None): Optional description/body.
-        colour (discord.Colour | None): Optional colour.
-        url (str | None): Optional URL.
+        title: Title of the embed.
+        description: Optional description/body.
+        colour: Optional accent colour.
+        url: Optional URL for the title.
 
     Returns:
-        discord.Embed: Discord embed.
+        A discord.Embed ready to be sent.
     """
     embed = discord.Embed(
         title=title,
@@ -43,18 +40,15 @@ def success(
     description: str | None = None,
     url: str | None = None,
 ) -> discord.Embed:
-    """
-    General use success Discord embed template.
-
-    Preconfigured to be green.
+    """Build a green success embed.
 
     Args:
-        title (str): Title of the embed.
-        description (str | None): Optional description/body.
-        url (str | None): Optional URL.
+        title: Title of the embed.
+        description: Optional description/body.
+        url: Optional URL for the title.
 
     Returns:
-        discord.Embed: Discord embed.
+        A green-accented discord.Embed.
     """
     return _base(
         title=title,
@@ -69,17 +63,14 @@ def error(
     title: str,
     description: str | None = None,
 ) -> discord.Embed:
-    """
-    General use error Discord embed template.
-
-    Preconfigured to be red.
+    """Build a red error embed.
 
     Args:
-        title (str): Title of the embed.
-        description (str | None): Optional description/body.
+        title: Title of the embed.
+        description: Optional description/body.
 
     Returns:
-        discord.Embed: Discord embed.
+        A red-accented discord.Embed.
     """
     return _base(
         title=title,
@@ -93,17 +84,14 @@ def info(
     title: str,
     description: str | None = None,
 ) -> discord.Embed:
-    """
-    General use information Discord embed template.
-
-    Preconfigured to be blue.
+    """Build a blurple informational embed.
 
     Args:
-        title (str): Title of the embed.
-        description (str | None): Optional description/body.
+        title: Title of the embed.
+        description: Optional description/body.
 
     Returns:
-        discord.Embed: Discord embed.
+        A blurple-accented discord.Embed.
     """
     return _base(
         title=title,
@@ -117,15 +105,15 @@ def media_download(
     signed_url: str,
     requester_id: int,
 ) -> discord.Embed:
-    """
-    Media download link Discord embed template.
+    """Build the embed delivered to the user with the archive download link.
 
     Args:
-        signed_url (str): The SAS URL to download the archive.
-        requester_id (int): The ID of the requesting user.
+        signed_url: The pre-signed URL the user clicks to download the archive.
+        requester_id: Discord user ID of the requester, rendered as a mention
+            in the footer.
 
     Returns:
-        discord.Embed: Discord embed.
+        A green discord.Embed linking to the archive.
     """
     embed = success(
         title="Channel Media Download",
@@ -140,15 +128,15 @@ def job_enqueued(
     task_id: str,
     only_me: bool,
 ) -> discord.Embed:
-    """
-    Job enqueued ack Discord embed template.
+    """Build the ack embed shown when a /download is accepted onto the queue.
 
     Args:
-        task_id (str): The ID of the queued task.
-        only_me (bool): The Id of the requesting user.
+        task_id: The Taskiq task ID, rendered in the footer for support traceability.
+        only_me: ``True`` when the requester chose DM-only delivery. Drives the
+            description wording.
 
     Returns:
-        discord.Embed: Discord embed.
+        A blurple discord.Embed acknowledging the queued job.
     """
     embed = info(
         title="Download queued",

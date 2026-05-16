@@ -20,6 +20,7 @@ class Download(commands.Cog, name="download"):
     """Download commands cog."""
 
     def __init__(self, bot) -> None:
+        """Bind the cog to its parent bot."""
         self.bot = bot
 
     @commands.hybrid_command(

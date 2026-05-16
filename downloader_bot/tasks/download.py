@@ -76,6 +76,56 @@ async def download_channel_media(
     ],
     redis: Annotated[Redis, TaskiqDepends(get_redis)],
 ) -> DownloadResult:
+    """Stream a channel's attachments into a zip, upload, then deliver the URL.
+
+    Two-phase pipeline, each phase guarded by a Redis idempotency key so a
+    Taskiq retry (same ``task_id``) skips already-completed work:
+
+    1. **Upload** — walk ``channel.history()``, filter by the guild's
+       ``allowed_media_types``, stream attachments through stream-zip into
+       the storage backend, and cache the SAS URL.
+    2. **Deliver** — either DM the requester or post into the guild's
+       configured results channel (with DM fallback).
+
+    Effective delivery mode: ``only_me=True`` forces DM; otherwise honour
+    ``GuildSettings.delivery_mode`` (defaults to ``dm`` for unconfigured
+    guilds).
+
+    Args:
+        channel_id: The Discord channel whose attachments are zipped.
+        user_id: The requesting user; receives DMs, used as channel-post
+            fallback, and rendered in the delivery embed footer.
+        guild_id: The guild the command was invoked from, or ``None`` for
+            DMs. Used to look up ``GuildSettings`` (delivery mode, retention,
+            media-type filter); ``None`` skips the lookup and uses defaults.
+        only_me: When ``True``, forces DM delivery regardless of guild
+            settings.
+        context: Injected Taskiq context; ``context.message.task_id`` keys
+            the idempotency entries.
+        progress: Injected progress tracker; phase changes are published to
+            the Taskiq admin UI.
+        client: Injected REST-only discord.py client (worker-shared).
+        download_session: Injected aiohttp session used by the zip pipeline
+            (worker-shared, separate from discord.py's HTTP client).
+        storage: Injected storage backend, kept warm for the worker's
+            lifetime via an ``AsyncExitStack``.
+        settings_repo: Injected per-guild settings repo.
+        redis: Injected Redis client for idempotency state (app-namespaced,
+            separate from the Taskiq result backend).
+
+    Returns:
+        The archive URL and the delivery mode actually used.
+
+    Raises:
+        TypeError: ``channel_id`` resolved to a non-messageable resource.
+        UploadError: The blob upload failed; the partial blob is best-effort
+            deleted before the exception propagates.
+        SignedUrlError: The upload succeeded but SAS signing failed.
+        AttachmentStreamError: An attachment's HTTP body failed mid-stream.
+        discord.Forbidden: The bot lacks ``Read Message History`` on the
+            channel, or DMing the user is blocked.
+        DMUnavailable: DM delivery raised ``Forbidden``.
+    """
     task_id = context.message.task_id
 
     # Resolve effective delivery mode: only_me forces DM, otherwise honour

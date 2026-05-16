@@ -13,6 +13,15 @@ import asyncpg
 
 @dataclass(frozen=True, slots=True)
 class GuildSettings:
+    """Per-guild configuration row, with safe defaults baked in.
+
+    Constructing ``GuildSettings(guild_id=N)`` without DB-row defaults is
+    the canonical "unconfigured guild" object: ``delivery_mode='dm'``,
+    no results channel, no media-type filter, 24h retention. The repo's
+    :meth:`GuildSettingsRepo.get` returns this rather than ``None`` on a
+    missing row, so callers never need to special-case absence.
+    """
+
     guild_id: int
     delivery_mode: str = "dm"  # 'dm' | 'channel'
     results_channel_id: int | None = None
@@ -27,10 +36,24 @@ class GuildSettingsRepo:
     """CRUD for guild_settings. Constructed once per worker / bot process."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:
+        """Bind the repo to a long-lived asyncpg pool.
+
+        Args:
+            pool: Process-wide asyncpg pool; the repo only borrows
+                connections from it.
+        """
         self._pool = pool
 
     async def get(self, guild_id: int) -> GuildSettings:
-        """Return settings for ``guild_id``. Missing row → defaults."""
+        """Return settings for ``guild_id``, with defaults for a missing row.
+
+        Args:
+            guild_id: The Discord guild ID to look up.
+
+        Returns:
+            A ``GuildSettings`` populated from the database, or a default
+            ``GuildSettings(guild_id=guild_id)`` if no row exists.
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM guild_settings WHERE guild_id = $1",
@@ -52,7 +75,16 @@ class GuildSettingsRepo:
         )
 
     async def upsert(self, settings: GuildSettings) -> None:
-        """Insert-or-update — used by the `/setup` cog."""
+        """Insert or replace the row for ``settings.guild_id``.
+
+        This is a single-shot overwrite (every non-PK column is written),
+        not a read-modify-write. Callers wanting to preserve untouched
+        columns must read first and pass a ``replace(...)``-modified copy
+        — see :meth:`Setup.setup_clear` in [cogs/setup.py](../cogs/setup.py).
+
+        Args:
+            settings: The full target row state.
+        """
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """

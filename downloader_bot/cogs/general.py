@@ -8,14 +8,10 @@ from downloader_bot.embeds import info
 
 
 class General(commands.Cog, name="general"):
-    """
-    General commands cog.
-
-    Attributes:
-        bot (DiscordBot): DiscordBot instance.
-    """
+    """General-purpose commands available in every server (and DMs)."""
 
     def __init__(self, bot) -> None:
+        """Bind the cog to its parent bot."""
         self.bot = bot
 
     @commands.hybrid_command(
@@ -23,11 +19,13 @@ class General(commands.Cog, name="general"):
         description="Get the invite link of the bot.",
     )
     async def invite(self, context: Context) -> None:
-        """
-        Get the invite link of the bot.
+        """Send the requester an embed with the bot's invite link.
+
+        DMs the embed first; falls back to an ephemeral channel reply if
+        the user has DMs disabled.
 
         Args:
-            context (Context): The command context.
+            context: The command context.
         """
         embed = info(
             title="Bot Invite",
@@ -41,10 +39,9 @@ class General(commands.Cog, name="general"):
 
 
 async def setup(bot) -> None:
-    """
-    Used to load this cog into a Bot.
+    """Extension entry point; called by ``bot.load_extension``.
 
     Args:
-        bot (DiscordBot): The bot instance to load this cog.
+        bot: The bot instance to load this cog into.
     """
     await bot.add_cog(General(bot))

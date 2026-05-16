@@ -38,6 +38,7 @@ select = [
   "SIM",   # flake8-simplify
   "ASYNC", # async-specific footguns
   "RUF",   # ruff-specific rules
+  "D",     # pydocstyle (Google convention, see [tool.ruff.lint.pydocstyle])
 ]
 ignore = [
   "B008",   # discord.py decorators legitimately use call-in-default
@@ -45,8 +46,12 @@ ignore = [
   "N818",   # NotGuildOwner / Retry / RetryJob aren't *Error
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["PLR2004", "S101"]
+"tests/**" = ["PLR2004", "S101", "D"]
+"downloader_bot/**/__init__.py" = ["D104"]
 "downloader_bot/bot.py" = ["N802"]
 
 [tool.ruff.lint.isort]

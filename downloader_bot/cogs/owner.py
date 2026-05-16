@@ -10,17 +10,10 @@ _VALID_SCOPES = ("global", "guild")
 
 
 class Owner(commands.Cog, name="owner"):
-    """
-    Owner commands cog.
-
-    This class contains commands that can only be executed by the owner of the
-    Discord bot.
-
-    Attributes:
-        bot (DiscordBot): DiscordBot instance.
-    """
+    """Bot-owner-only commands (prefix-only)."""
 
     def __init__(self, bot) -> None:
+        """Bind the cog to its parent bot."""
         self.bot = bot
 
     @commands.command(
@@ -30,12 +23,14 @@ class Owner(commands.Cog, name="owner"):
     @app_commands.describe(scope="The scope of the sync. Can be `global` or `guild`")
     @commands.is_owner()
     async def sync(self, context: Context, scope: str) -> None:
-        """
-        Synchronise slash commands either globally or for the current guild.
+        """Re-register slash commands globally or for the current guild.
+
+        Run this after adding or changing a hybrid command before the
+        slash UI reflects the change.
 
         Args:
-            context (Context): The command context.
-            scope (str): The scope of the sync. Must be `global` or `guild`.
+            context: The command context.
+            scope: ``global`` or ``guild``.
         """
         if scope not in _VALID_SCOPES:
             self.bot.logger.warning(
@@ -90,10 +85,9 @@ class Owner(commands.Cog, name="owner"):
 
 
 async def setup(bot) -> None:
-    """
-    Used to load this cog into a Bot.
+    """Extension entry point; called by ``bot.load_extension``.
 
     Args:
-        bot (DiscordBot): The bot instance to load this cog.
+        bot: The bot instance to load this cog into.
     """
     await bot.add_cog(Owner(bot))
