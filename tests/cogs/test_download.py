@@ -125,6 +125,77 @@ class TestDmContext:
         assert mock_kiq.await_args.kwargs["guild_id"] is None
 
 
+class TestRateLimit:
+    async def test_rate_limited_non_owner_blocks_kiq_with_ephemeral_embed(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        allow_ratelimit,
+    ):
+        # mock_context defaults to owner_id=999 (not the author's 42),
+        # so the rate-limit branch runs. Force the bucket to deny.
+        allow_ratelimit.return_value = (False, 720.0)
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        allow_ratelimit.assert_awaited_once()
+        mock_kiq.assert_not_awaited()
+        # Rate-limit replies are always ephemeral, regardless of only_me.
+        assert mock_context.send.await_args.kwargs["ephemeral"] is True
+        assert _last_embed(mock_context).title == "Rate limit reached"
+
+    async def test_guild_owner_bypasses_rate_limit(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        allow_ratelimit,
+    ):
+        # Make the author the guild owner.
+        mock_context.guild.owner_id = mock_context.author.id
+        # Even with a "deny" verdict ready, owner-bypass means acquire
+        # is never called and the enqueue proceeds.
+        allow_ratelimit.return_value = (False, 720.0)
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        allow_ratelimit.assert_not_awaited()
+        mock_kiq.assert_awaited_once()
+
+    async def test_dm_context_skips_rate_limit(
+        self,
+        mock_bot,
+        dm_context,
+        mock_kiq,
+        allow_ratelimit,
+    ):
+        # No guild → nothing to rate-limit. acquire must not be called.
+        cog = Download(mock_bot)
+
+        await _invoke(cog, dm_context)
+
+        allow_ratelimit.assert_not_awaited()
+        mock_kiq.assert_awaited_once()
+
+    async def test_allowed_non_owner_passes_through_to_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        allow_ratelimit,
+    ):
+        # Default allow_ratelimit return value is (True, 0.0).
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        allow_ratelimit.assert_awaited_once()
+        mock_kiq.assert_awaited_once()
+
+
 class TestBrokerUnavailable:
     async def test_kiq_raises_surfaces_service_unavailable_embed(
         self,

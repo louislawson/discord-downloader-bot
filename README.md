@@ -97,6 +97,8 @@ All configuration is loaded from `.env` by [pydantic-settings](https://docs.pyda
 | `LOGGING_LEVEL`                         | no       | `DEBUG`, `INFO`, `WARNING`, `ERROR`. Defaults to `INFO`.                                                                                             |
 | `INVITE_LINK`                           | no       | Bot invite URL surfaced by `/invite`. If unset, `/invite` will DM a broken link — set this to a real OAuth invite URL.                               |
 | `ATTACHMENT_CHUNK_SIZE`                 | no       | CDN read chunk size for the streaming-zip pipeline (default 64 KiB). Also caps per-job in-flight bytes from the CDN.                                 |
+| `GUILD_RATE_LIMIT_PER_HOUR`             | no       | Long-run cap on `/download` enqueues per guild, per hour (default 5). Guild owners bypass; DM-context `/download` is exempt.                         |
+| `GUILD_RATE_LIMIT_BURST`                | no       | Burst allowance for the per-guild rate limiter — tokens bankable during quiet periods (default 2). Set both knobs very high to effectively disable.  |
 | `TASKIQ_ADMIN_URL`                      | no       | Base URL of the Taskiq Admin UI. Required if you want the admin middleware to publish task lifecycle events.                                         |
 | `TASKIQ_ADMIN_API_TOKEN`                | no       | API token the bot uses to authenticate to the admin UI (and the value the `taskiq_admin` compose service requires).                                  |
 | `TASKIQ_ADMIN_BROKER_NAME`              | no       | Friendly broker name shown in the admin UI.                                                                                                          |

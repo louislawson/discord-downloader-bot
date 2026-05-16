@@ -8,6 +8,7 @@ import discord
 import discordhealthcheck
 from discord.ext import commands, tasks
 from discord.ext.commands import Context, errors
+from redis.asyncio import Redis
 
 from downloader_bot.config import settings
 from downloader_bot.db.guild_settings import GuildSettingsRepo
@@ -44,6 +45,7 @@ class DiscordBot(commands.Bot):
         self.healthcheck_server = None
         self.db_pool: asyncpg.Pool | None = None
         self.guild_settings_repo: GuildSettingsRepo | None = None
+        self.redis: Redis | None = None
         self._status_picker = cycle_random(STATUSES)
 
     async def load_cogs(self) -> None:
@@ -100,6 +102,10 @@ class DiscordBot(commands.Bot):
             await broker.startup()
         self.db_pool = await build_pool()
         self.guild_settings_repo = GuildSettingsRepo(self.db_pool)
+        # App-namespaced Redis client (distinct from the Taskiq result-backend
+        # Redis used internally by the broker). Cogs read it off self.bot.redis
+        # for per-guild rate-limit state.
+        self.redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
         await self.load_cogs()
         self.healthcheck_server = await discordhealthcheck.start(self)
         self.logger.info("Connected to Redis at %s", settings.REDIS_URL)
@@ -117,6 +123,8 @@ class DiscordBot(commands.Bot):
             await broker.shutdown()
         if self.db_pool is not None:
             await close_pool(self.db_pool)
+        if self.redis is not None:
+            await self.redis.aclose()
         await super().close()
 
     # pylint: disable=arguments-differ

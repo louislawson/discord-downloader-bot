@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # in-flight bytes from the CDN.
     ATTACHMENT_CHUNK_SIZE: int = 64 * 1024
 
+    # Per-guild rate limit on /download enqueues. Token bucket: long-run cap
+    # is GUILD_RATE_LIMIT_PER_HOUR, with up to GUILD_RATE_LIMIT_BURST tokens
+    # bankable during quiet periods. Guild owners bypass.
+    GUILD_RATE_LIMIT_PER_HOUR: int = 5
+    GUILD_RATE_LIMIT_BURST: int = 2
+
     # Taskiq Admin
     TASKIQ_ADMIN_URL: str | None = None
     TASKIQ_ADMIN_API_TOKEN: str | None = None

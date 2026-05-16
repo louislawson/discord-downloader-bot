@@ -8,10 +8,15 @@ Discord interaction-token window and lets independent channels run in
 parallel.
 """
 
+from datetime import UTC, datetime, timedelta
+
+import discord
 from discord.ext import commands
 from discord.ext.commands import Context
 from taskiq import AsyncTaskiqTask
 
+from downloader_bot.config import settings
+from downloader_bot.download import ratelimit
 from downloader_bot.embeds import error, job_enqueued
 from downloader_bot.tasks.download import DownloadResult, download_channel_media
 
@@ -49,6 +54,30 @@ class Download(commands.Cog, name="download"):
                 ephemeral=only_me,
             )
             return
+
+        # Per-guild rate limit. Owner bypass; DM-context /download has no
+        # guild to rate-limit, so the check is skipped. Reply is always
+        # ephemeral so a rate-limit hit doesn't itself spam the channel.
+        if context.guild and context.author.id != context.guild.owner_id:
+            allowed, retry_after = await ratelimit.acquire(
+                self.bot.redis,
+                context.guild.id,
+                capacity=settings.GUILD_RATE_LIMIT_BURST,
+                refill_per_hour=settings.GUILD_RATE_LIMIT_PER_HOUR,
+            )
+            if not allowed:
+                retry_at = datetime.now(UTC) + timedelta(seconds=retry_after)
+                await context.send(
+                    embed=error(
+                        title="Rate limit reached",
+                        description=(
+                            "This server has used its `/download` allowance. "
+                            f"Try again {discord.utils.format_dt(retry_at, 'R')}."
+                        ),
+                    ),
+                    ephemeral=True,
+                )
+                return
 
         try:
             task: AsyncTaskiqTask[DownloadResult] = await download_channel_media.kiq(
