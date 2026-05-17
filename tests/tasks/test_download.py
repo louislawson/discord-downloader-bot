@@ -17,7 +17,10 @@ import discord
 import pytest
 
 from downloader_bot.db.guild_settings import GuildSettings
-from downloader_bot.download.zip_stream import AttachmentStreamError
+from downloader_bot.download.zip_stream import (
+    AttachmentStreamError,
+    NoMatchingAttachments,
+)
 from downloader_bot.storage.exceptions import UploadError
 from downloader_bot.tasks.download import download_channel_media
 
@@ -128,11 +131,18 @@ class TestHappyPathDm:
         assert result == {
             "url": "https://example/signed?sas",
             "delivery_mode": "dm",
+            "status": "delivered",
         }
         mock_storage_backend.upload_and_sign.assert_awaited_once()
-        dm_user.assert_awaited_once_with(
-            mock_discord_client, 42, "https://example/signed?sas"
-        )
+        # Orchestrator builds a green success embed carrying the URL.
+        dm_user.assert_awaited_once()
+        call_args = dm_user.await_args
+        assert call_args.args[0] is mock_discord_client
+        assert call_args.args[1] == 42
+        embed = call_args.args[2]
+        assert isinstance(embed, discord.Embed)
+        assert embed.colour == discord.Color.green()
+        assert "https://example/signed?sas" in embed.description
         # Idempotency markers both written (archive_url + delivered).
         assert mock_redis.set.await_count == 2
 
@@ -180,12 +190,16 @@ class TestHappyPathChannelMode:
         )
 
         assert result["delivery_mode"] == "channel"
-        post_to_channel.assert_awaited_once_with(
-            mock_discord_client,
-            999,
-            "https://x/signed",
-            fallback_user_id=42,
-        )
+        assert result["status"] == "delivered"
+        post_to_channel.assert_awaited_once()
+        call_args = post_to_channel.await_args
+        assert call_args.args[0] is mock_discord_client
+        assert call_args.args[1] == 999
+        embed = call_args.args[2]
+        assert isinstance(embed, discord.Embed)
+        assert embed.colour == discord.Color.green()
+        assert "https://x/signed" in embed.description
+        assert call_args.kwargs == {"fallback_user_id": 42}
 
     async def test_channel_mode_without_results_channel_falls_back_to_dm(
         self,
@@ -821,3 +835,233 @@ class TestFiltersFlowThrough:
         assert (
             kwargs["matches"](MagicMock(content_type="image/png"), MagicMock()) is True
         )
+
+
+# --- Empty-channel short-circuit ------------------------------------------
+
+
+class TestEmptyChannel:
+    async def test_empty_channel_dms_red_error_embed(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Stream raises NoMatchingAttachments → orchestrator short-circuits,
+        # sends the no_attachments embed via DM, marks delivered, and
+        # returns status='empty'.
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_redis.exists = AsyncMock(return_value=0)
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=NoMatchingAttachments("nothing to zip")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        dm_user = mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        result = await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        assert result == {
+            "url": "",
+            "delivery_mode": "dm",
+            "status": "empty",
+        }
+        dm_user.assert_awaited_once()
+        embed = dm_user.await_args.args[2]
+        assert isinstance(embed, discord.Embed)
+        assert embed.colour == discord.Color.red()
+
+    async def test_empty_channel_in_channel_mode_posts_to_results_channel(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        make_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # delivery_mode='channel' with results_channel_id set → empty-channel
+        # notice goes to the configured results channel, same as a success
+        # delivery would.
+        settings_repo = make_settings_repo(
+            GuildSettings(
+                guild_id=12345,
+                delivery_mode="channel",
+                results_channel_id=999,
+            )
+        )
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=NoMatchingAttachments("nothing to zip")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        post_to_channel = mocker.patch(
+            "downloader_bot.tasks.download.deliver.post_to_channel",
+            new_callable=AsyncMock,
+        )
+
+        result = await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=settings_repo,
+            redis=mock_redis,
+        )
+
+        assert result["status"] == "empty"
+        assert result["delivery_mode"] == "channel"
+        post_to_channel.assert_awaited_once()
+        embed = post_to_channel.await_args.args[2]
+        assert embed.colour == discord.Color.red()
+        assert post_to_channel.await_args.kwargs == {"fallback_user_id": 42}
+
+    async def test_empty_channel_caches_sentinel_for_retry(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # On the empty path the orchestrator caches "" under archive_url so a
+        # Taskiq retry skips re-walking history.
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=NoMatchingAttachments("nothing to zip")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        # The archive_url cache call carries the empty sentinel.
+        archive_set_calls = [
+            c
+            for c in mock_redis.set.await_args_list
+            if c.args[0] == "task:task-abc:archive_url"
+        ]
+        assert len(archive_set_calls) == 1
+        assert archive_set_calls[0].args[1] == ""
+
+    async def test_retry_with_cached_sentinel_skips_history_walk(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Retry: archive_url cache already holds the empty sentinel. The
+        # upload phase short-circuits without touching fetch_channel or
+        # storage; the delivery phase still sends the error embed unless
+        # delivered marker is also set.
+        mock_redis.get = AsyncMock(return_value="")
+        mock_redis.exists = AsyncMock(return_value=0)
+        dm_user = mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        result = await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        assert result["status"] == "empty"
+        mock_discord_client.fetch_channel.assert_not_awaited()
+        mock_storage_backend.upload_and_sign.assert_not_awaited()
+        dm_user.assert_awaited_once()
+        embed = dm_user.await_args.args[2]
+        assert embed.colour == discord.Color.red()
+
+    async def test_empty_channel_cleanup_runs_best_effort(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Best-effort delete_blob runs even on the empty short-circuit, in
+        # case the storage SDK staged anything before the iterator raised.
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=NoMatchingAttachments("nothing to zip")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        mock_storage_backend.delete_blob.assert_awaited_once()

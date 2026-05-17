@@ -28,6 +28,7 @@ import pytest
 
 from downloader_bot.download.zip_stream import (
     AttachmentStreamError,
+    NoMatchingAttachments,
     _members,
     _stream_response,
     build_zip_stream,
@@ -360,9 +361,9 @@ class TestBuildZipStream:
             f"peak yield was {max(sizes)} bytes — pipeline may be buffering"
         )
 
-    async def test_empty_channel_produces_valid_empty_zip(self, async_iter):
-        # No messages → stream yields the central-directory-only archive.
-        # zipfile should still read it as a valid (empty) zip.
+    async def test_empty_channel_raises_no_matching_attachments(self, async_iter):
+        # No messages → peek wrapper raises before any bytes hit the consumer,
+        # so the worker can short-circuit instead of uploading an empty zip.
         session = MagicMock()
         channel = _channel_with([], async_iter)
 
@@ -372,10 +373,85 @@ class TestBuildZipStream:
             matches=None,
             chunk_size=64,
         )
+
+        with pytest.raises(NoMatchingAttachments):
+            await _drain_to_buffer(stream)
+
+    async def test_all_attachments_filtered_out_raises(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Every attachment is text/plain but the matcher accepts only
+        # image/png. _members yields nothing → peek wrapper raises.
+        session = MagicMock()
+        att = make_attachment(content_type="text/plain", filename="readme.txt")
+        msg = make_message(attachments=(att,))
+        channel = _channel_with([msg], async_iter)
+
+        stream = build_zip_stream(
+            session,
+            channel,
+            matches=_mime_matcher("image/png"),
+            chunk_size=64,
+        )
+
+        with pytest.raises(NoMatchingAttachments):
+            await _drain_to_buffer(stream)
+
+    async def test_all_pre_flight_failures_raises(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Every attachment GET returns 404; _members skips them all and
+        # exhausts. The peek wrapper raises so a useless empty zip is
+        # never uploaded.
+        resp = _make_response(status=404)
+        session = _make_session(resp)
+        att = make_attachment(content_type="image/png", filename="missing.png")
+        msg = make_message(attachments=(att,))
+        channel = _channel_with([msg], async_iter)
+
+        stream = build_zip_stream(
+            session,
+            channel,
+            matches=_mime_matcher("image/png"),
+            chunk_size=64,
+        )
+
+        with pytest.raises(NoMatchingAttachments):
+            await _drain_to_buffer(stream)
+
+    async def test_peek_does_not_swallow_first_member(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Single matching attachment must round-trip through the peek
+        # wrapper unmodified (regression guard: the peek read the first
+        # member and could drop it if not re-yielded).
+        body = b"only"
+        resp = _make_response(chunks=(body,))
+        session = _make_session(resp)
+        att = make_attachment(content_type="image/png", filename="solo.png")
+        msg = make_message(message_id=11, attachments=(att,))
+        channel = _channel_with([msg], async_iter)
+
+        stream = build_zip_stream(
+            session,
+            channel,
+            matches=_mime_matcher("image/png"),
+            chunk_size=64,
+        )
         buf, _sizes = await _drain_to_buffer(stream)
 
         with ZipFile(buf) as zf:
-            assert zf.namelist() == []
+            assert zf.namelist() == ["11_solo.png"]
+            assert zf.read("11_solo.png") == body
 
     async def test_before_after_kwargs_forward_to_history(self, async_iter):
         # build_zip_stream is the public entry; ensure date bounds make
@@ -392,6 +468,7 @@ class TestBuildZipStream:
             after=after,
             chunk_size=64,
         )
-        await _drain_to_buffer(stream)
+        with pytest.raises(NoMatchingAttachments):
+            await _drain_to_buffer(stream)
 
         channel.history.assert_called_once_with(limit=None, before=before, after=after)

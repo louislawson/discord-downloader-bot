@@ -2,9 +2,10 @@
 
 The arq predecessor had a single ``deliver(...)`` with all the routing
 logic baked in, plus Redis idempotency. In the Taskiq version that's
-split: ``dm_user``/``post_to_channel`` are pure-Discord; idempotency
-lives in ``app/download/idempotency.py`` (tested separately) and routing
-lives in the orchestrator (tested in ``tests/tasks/test_download.py``).
+split: ``dm_user``/``post_to_channel`` are pure-Discord (taking a pre-
+built embed); idempotency lives in ``app/download/idempotency.py``
+(tested separately) and routing lives in the orchestrator (tested in
+``tests/tasks/test_download.py``).
 """
 
 from unittest.mock import AsyncMock, MagicMock
@@ -15,17 +16,22 @@ import pytest
 from downloader_bot.download.deliver import DMUnavailable, dm_user, post_to_channel
 
 
-class TestDmUser:
-    async def test_sends_archive_url_via_dm(self, mock_discord_client, user_mock):
-        mock_discord_client.fetch_user.return_value = user_mock
+def _embed(description: str = "hello") -> discord.Embed:
+    """Trivial embed to pass through the deliver helpers."""
+    return discord.Embed(title="t", description=description)
 
-        await dm_user(mock_discord_client, 42, "https://x/signed?sas")
+
+class TestDmUser:
+    async def test_sends_embed_via_dm(self, mock_discord_client, user_mock):
+        mock_discord_client.fetch_user.return_value = user_mock
+        embed = _embed(description="hi-from-test")
+
+        await dm_user(mock_discord_client, 42, embed)
 
         mock_discord_client.fetch_user.assert_awaited_once_with(42)
         user_mock.send.assert_awaited_once()
-        # URL appears verbatim in the embed description.
-        embed = user_mock.send.await_args.kwargs["embed"]
-        assert "https://x/signed?sas" in embed.description
+        # The exact embed object is passed through unchanged.
+        assert user_mock.send.await_args.kwargs["embed"] is embed
 
     async def test_forbidden_raises_dm_unavailable(
         self,
@@ -40,7 +46,7 @@ class TestDmUser:
         mock_discord_client.fetch_user.return_value = user_mock
 
         with pytest.raises(DMUnavailable, match="cannot DM user 42"):
-            await dm_user(mock_discord_client, 42, "https://x")
+            await dm_user(mock_discord_client, 42, _embed())
 
     async def test_non_forbidden_http_exception_propagates_unwrapped(
         self,
@@ -54,29 +60,28 @@ class TestDmUser:
         mock_discord_client.fetch_user.return_value = user_mock
 
         with pytest.raises(discord.HTTPException):
-            await dm_user(mock_discord_client, 42, "https://x")
+            await dm_user(mock_discord_client, 42, _embed())
 
 
 class TestPostToChannel:
-    async def test_posts_with_requester_mention(
+    async def test_posts_embed_in_channel(
         self,
         mock_discord_client,
         channel_mock,
     ):
         mock_discord_client.fetch_channel.return_value = channel_mock
+        embed = _embed(description="for-channel")
 
         await post_to_channel(
             mock_discord_client,
             999,
-            "https://x/signed",
+            embed,
             fallback_user_id=42,
         )
 
         mock_discord_client.fetch_channel.assert_awaited_once_with(999)
         channel_mock.send.assert_awaited_once()
-        embed = channel_mock.send.await_args.kwargs["embed"]
-        assert "<@42>" in embed.footer.text
-        assert "https://x/signed" in embed.description
+        assert channel_mock.send.await_args.kwargs["embed"] is embed
 
     async def test_non_messageable_falls_back_to_dm(
         self,
@@ -87,16 +92,19 @@ class TestPostToChannel:
         not_messageable = MagicMock()  # no Messageable spec → isinstance False
         mock_discord_client.fetch_channel.return_value = not_messageable
         mock_discord_client.fetch_user.return_value = user_mock
+        embed = _embed()
 
         await post_to_channel(
             mock_discord_client,
             999,
-            "https://x",
+            embed,
             fallback_user_id=42,
         )
 
-        # Channel attempt was made but didn't send; DM took over.
+        # Channel attempt was made but didn't send; DM took over with the
+        # same embed.
         user_mock.send.assert_awaited_once()
+        assert user_mock.send.await_args.kwargs["embed"] is embed
 
     async def test_channel_not_found_falls_back_to_dm(
         self,
@@ -110,7 +118,7 @@ class TestPostToChannel:
         await post_to_channel(
             mock_discord_client,
             999,
-            "https://x",
+            _embed(),
             fallback_user_id=42,
         )
 
@@ -132,7 +140,7 @@ class TestPostToChannel:
         await post_to_channel(
             mock_discord_client,
             999,
-            "https://x",
+            _embed(),
             fallback_user_id=42,
         )
 
@@ -157,6 +165,6 @@ class TestPostToChannel:
             await post_to_channel(
                 mock_discord_client,
                 999,
-                "https://x",
+                _embed(),
                 fallback_user_id=42,
             )

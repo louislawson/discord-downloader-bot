@@ -123,6 +123,28 @@ def media_download(
     return embed
 
 
+def no_attachments(*, requester_id: int) -> discord.Embed:
+    """Build the error embed shown when a /download channel had nothing to archive.
+
+    Args:
+        requester_id: Discord user ID of the requester, rendered as a mention
+            in the footer.
+
+    Returns:
+        A red discord.Embed explaining the empty result.
+    """
+    embed = error(
+        title="No media found",
+        description=(
+            "This channel has no attachments to archive — either it's empty, "
+            "the messages contain no files, or the server's allowed media-type "
+            "filter excluded everything."
+        ),
+    )
+    embed.set_footer(text=f"Requested by <@{requester_id}>")
+    return embed
+
+
 def job_enqueued(
     *,
     task_id: str,

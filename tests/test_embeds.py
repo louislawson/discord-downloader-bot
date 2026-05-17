@@ -73,6 +73,22 @@ class TestTimestampIsEvaluatedPerCall:
         assert second.timestamp == ts2
 
 
+class TestNoAttachments:
+    @pytest.fixture
+    def embed(self):
+        return embeds.no_attachments(requester_id=42)
+
+    def test_inherits_error_colour_and_author(self, embed):
+        assert embed.colour == discord.Color.red()
+        assert embed.author.name == "Downloader Bot"
+
+    def test_footer_mentions_requester(self, embed):
+        assert "<@42>" in embed.footer.text
+
+    def test_title_signals_empty_result(self, embed):
+        assert embed.title == "No media found"
+
+
 class TestMediaDownload:
     @pytest.fixture
     def embed(self):
