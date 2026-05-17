@@ -6,7 +6,7 @@ The bot itself only enqueues Taskiq tasks — a separate Taskiq worker (same ima
 
 ## Commands
 
-- **`/download [dm_me] [media_type] [from_user] [before] [after] [during]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. Filters:
+- **`/download [dm_me] [media_type] [from_user] [before] [after] [during]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. If the channel yields nothing to archive (empty, everything filtered out, all CDN pre-flights failed) the requester gets a red "No media found" embed instead. Filters:
   - `dm_me: true` — force private DM delivery (overrides the server's configured mode) and hide the ack from the channel.
   - `media_type` — one of `image`, `video`, `audio`, `gif`, `other`. Intersected with the guild's `allowed_media_types`.
   - `from_user` — restrict to attachments posted by this user.
@@ -38,7 +38,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-The bot runs under [watchfiles](https://watchfiles.helpmanual.io/) and the worker / scheduler use Taskiq's own `--reload` flag, so any `.py` change under [downloader_bot/](downloader_bot/) triggers an automatic restart. The repo is mounted into `/bot/` inside every service.
+The bot runs under [watchfiles](https://watchfiles.helpmanual.io/) and the worker uses Taskiq's own `--reload` flag, so any `.py` change under [downloader_bot/](downloader_bot/) triggers an automatic restart for those two services. The scheduler does not auto-reload — restart it manually (`docker compose restart scheduler`) after editing a schedule decorator. The repo is mounted into `/bot/` inside every service.
 
 When `ENVIRONMENT=dev`, generated SAS URLs are rewritten from `AZURE_INT_URL` (the in-network Azurite hostname) to `AZURE_EXT_URL` (the host-reachable one) so links opened in your browser actually resolve — see [downloader_bot/storage/azure.py](downloader_bot/storage/azure.py).
 
@@ -115,7 +115,7 @@ downloader-bot/
 ├── downloader_bot/         # Application package — drop new modules here
 │   ├── bot.py              # Bot entry point: gateway client, cog loader, global error handler
 │   ├── config.py           # pydantic-settings singleton loaded from .env
-│   ├── embeds.py           # success/error/info/media_download embed helpers
+│   ├── embeds.py           # success/error/info/media_download/no_attachments/job_enqueued embed helpers
 │   ├── logging_setup.py    # init_logger() — one place to configure log format + level
 │   ├── presence.py         # Status strings + the no-repeat picker used by bot.status_task
 │   ├── tq.py               # Taskiq broker, scheduler, cancellation backend, worker startup hooks, typed dependency providers
@@ -169,17 +169,17 @@ make install-dev                    # installs requirements-dev.txt + runs `pre-
 
 ### Daily commands
 
-| Make target                  | Equivalent direct invocation                                                        | What it does                                                   |
-| ---------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `make test`                  | `python -m pytest`                                                                  | Runs the test suite.                                           |
-| `make test-cov`              | `python -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html` | Runs tests with coverage; HTML report at `htmlcov/index.html`. |
-| `make lint`                  | `python -m ruff check downloader_bot tests`                                         | Lints without modifying files.                                 |
-| `make format`                | `python -m ruff format downloader_bot tests && python -m ruff check --fix ...`      | Auto-formats and applies safe lint fixes in place.             |
-| `make format-check`          | `python -m ruff format --check downloader_bot tests`                                | Verifies formatting without writing — the CI-friendly check.   |
-| `make check`                 | `lint` + `format-check` + `test` in sequence                                        | One-shot pre-push gate. Exits non-zero if anything fails.      |
-| `make precommit`             | `pre-commit run --all-files`                                                        | Runs every pre-commit hook against the entire tree.            |
-| `make dev` / `down` / `logs` | `docker compose up` / `down` / `logs -f bot worker`                                 | Compose-stack convenience targets.                             |
-| `make clean`                 | `rm -rf .pytest_cache .ruff_cache .coverage htmlcov` + `__pycache__` sweep          | Wipes tooling caches.                                          |
+| Make target                  | Equivalent direct invocation                                                                            | What it does                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `make test`                  | `python -m pytest`                                                                                      | Runs the test suite.                                                                                       |
+| `make test-cov`              | `python -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html --cov-fail-under=85` | Runs tests with coverage; HTML report at `htmlcov/index.html`. Fails if coverage drops below 85%.          |
+| `make lint`                  | `python -m ruff check downloader_bot tests`                                                             | Lints without modifying files.                                                                             |
+| `make format`                | `python -m ruff format downloader_bot tests && python -m ruff check --fix ...`                          | Auto-formats and applies safe lint fixes in place.                                                         |
+| `make format-check`          | `python -m ruff format --check downloader_bot tests`                                                    | Verifies formatting without writing — the CI-friendly check.                                               |
+| `make check`                 | `lint` + `format-check` + `test-cov` in sequence                                                        | One-shot pre-push gate (enforces the 85% coverage floor via `test-cov`). Exits non-zero if anything fails. |
+| `make precommit`             | `pre-commit run --all-files`                                                                            | Runs every pre-commit hook against the entire tree.                                                        |
+| `make dev` / `down` / `logs` | `docker compose up` / `down` / `logs -f bot worker`                                                     | Compose-stack convenience targets.                                                                         |
+| `make clean`                 | `rm -rf .pytest_cache .ruff_cache .coverage htmlcov` + `__pycache__` sweep                              | Wipes tooling caches.                                                                                      |
 
 > **Windows without `make`**: `make` isn't bundled with Git Bash. Either `choco install make` once, or copy-paste the right-hand "direct invocation" column. Every target is a one-liner so the fallback is mechanical.
 
@@ -209,7 +209,7 @@ A few things worth knowing about the test setup:
 - `asyncio_mode = "auto"` in [pyproject.toml](pyproject.toml) means every `async def test_*` is treated as an asyncio test — no `@pytest.mark.asyncio` boilerplate.
 - The cross-cutting [tests/conftest.py](tests/conftest.py) sets required env vars (`TOKEN`, `AZURE_CONN_STR`, `POSTGRES_DSN`, etc.) at module-body time, *before* `downloader_bot.*` is imported, because [downloader_bot/config.py](downloader_bot/config.py) constructs the `settings` singleton at import.
 - For mocking `async for` over `channel.history(...)`, use the helpers in [tests/download/conftest.py](tests/download/conftest.py) — `AsyncMock` returns coroutines, which `async for` rejects.
-- There is no coverage threshold yet (`--cov-fail-under` is intentionally unset). `make test-cov` is a baseline-tracking tool, not a gate.
+- Coverage is gated at **85%** via `--cov-fail-under=85` on `make test-cov`, and `make check` runs `test-cov` — so any change that drops coverage below the floor fails the pre-push gate.
 
 ## How It Works
 
@@ -217,8 +217,8 @@ A few things worth knowing about the test setup:
 
 1. **Bot ack ([downloader_bot/cogs/download.py](downloader_bot/cogs/download.py)).** Validates the request (pre-checks `Read Message History` on the channel for the bot; parses any per-invocation filters), then calls `download_channel_media.kiq(channel_id=..., user_id=..., guild_id=..., dm_me=..., filters=...)`. Taskiq publishes the task to RabbitMQ and returns an `AsyncTaskiqTask`; the cog uses its `task_id` to render the blurple "Download queued" embed.
 2. **Worker pipeline ([downloader_bot/tasks/download.py](downloader_bot/tasks/download.py)).** A Taskiq worker pulls the task off the queue and runs two phases — each guarded by a Redis idempotency check so a retry skips already-completed work:
-   1. **Upload.** Resolve the guild's settings (delivery mode, allowed-media filter, retention hours; missing rows get safe defaults). Walk channel history via [`build_zip_stream`](downloader_bot/download/zip_stream.py) — an async iterable of zip-encoded bytes that composes `channel.history()` → aiohttp chunked GETs → `stream-zip`'s async generator. Feed the iterable directly to [`StorageBackend.upload_and_sign`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs), passing both a stable storage key (`channel-{channel_id}-{task_id}.zip`) and a friendly `download_filename` (e.g. `channel-general-2026-05-09.zip`) which the backend encodes into the SAS as a Content-Disposition override. A `try/finally` guarantees partial blobs are best-effort cleaned up on any failure path (including cancellation).
-   2. **Deliver.** If the guild's mode is `channel` and a results channel is set, post the SAS URL there (mentioning the requester); otherwise DM the requester. Channel posts fall back to DM if the channel is missing, the bot lacks permission, or the channel isn't `Messageable`. The "delivered" marker is set **after** the send returns, so a crash mid-send re-delivers on retry (duplicate DM beats no DM).
+   1. **Upload.** Resolve the guild's settings (delivery mode, allowed-media filter, retention hours; missing rows get safe defaults). Walk channel history via [`build_zip_stream`](downloader_bot/download/zip_stream.py) — an async iterable of zip-encoded bytes that composes `channel.history()` → aiohttp chunked GETs → `stream-zip`'s async generator. Feed the iterable directly to [`StorageBackend.upload_and_sign`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs), passing both a stable storage key (`channel-{channel_id}-{task_id}.zip`) and a friendly `download_filename` (e.g. `channel-general-2026-05-09.zip`) which the backend encodes into the SAS as a Content-Disposition override. A `try/finally` guarantees partial blobs are best-effort cleaned up on any failure path (including cancellation). If the channel yields no matching attachments (empty / fully filtered / all pre-flights failed), `build_zip_stream` raises `NoMatchingAttachments` before any blob bytes commit and the task caches an empty-string sentinel under the idempotency key so retries skip the history walk.
+   2. **Deliver.** Build the embed — the green archive-link embed when the upload produced a URL, the red "No media found" embed when the upload short-circuited as empty. If the guild's mode is `channel` and a results channel is set, post the embed there; otherwise DM the requester. Channel posts fall back to DM if the channel is missing, the bot lacks permission, or the channel isn't `Messageable`. The "delivered" marker is set **after** the send returns, so a crash mid-send re-delivers on retry (duplicate DM beats no DM).
 
 Errors are handled close to their source: storage failures raise typed exceptions from [downloader_bot/storage/exceptions.py](downloader_bot/storage/exceptions.py); mid-flight attachment HTTP failures raise [`AttachmentStreamError`](downloader_bot/download/zip_stream.py); DM-disabled users raise [`DMUnavailable`](downloader_bot/download/deliver.py). Anything unexpected propagates out of the task; Taskiq's `SimpleRetryMiddleware` retries it (up to 3 times) under the same `task_id`, and the idempotency layer makes that safe.
 
