@@ -14,7 +14,7 @@ test:
 	$(PYTHON) -m pytest
 
 test-cov:
-	$(PYTHON) -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html
+	$(PYTHON) -m pytest --cov=downloader_bot --cov-report=term-missing --cov-report=html --cov-fail-under=85
 
 lint:
 	$(PYTHON) -m ruff check downloader_bot tests
@@ -26,7 +26,7 @@ format:
 format-check:
 	$(PYTHON) -m ruff format --check downloader_bot tests
 
-check: lint format-check test
+check: lint format-check test-cov
 
 precommit:
 	pre-commit run --all-files
