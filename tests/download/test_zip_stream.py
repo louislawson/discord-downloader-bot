@@ -7,14 +7,18 @@ The tests verify three things:
    ``_members`` (the response is pre-flighted, then ``release()`` is
    called in the chunks generator's ``finally``).
 2. ``_members`` — pre-flight skipping (no zip entry left behind on
-   setup-time failures), correct member-tuple construction, and that
-   ``allowed_types`` filtering happens *before* the HTTP request so a
-   disallowed content type incurs zero network cost.
+   setup-time failures), correct member-tuple construction, and that the
+   per-attachment ``matches`` callable filters *before* the HTTP request
+   so a non-matching attachment incurs zero network cost. The MIME
+   normalisation that used to live here now lives in
+   ``downloader_bot.download.filters`` and is covered there.
 3. ``build_zip_stream`` end-to-end — round-trip producing a parseable
    zip including a unicode filename, plus a regression guard against
-   accidental in-memory buffering of the full archive.
+   accidental in-memory buffering of the full archive. Also asserts the
+   ``before`` / ``after`` kwargs are forwarded to ``channel.history``.
 """
 
+from datetime import UTC, datetime
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 from zipfile import ZipFile
@@ -73,6 +77,12 @@ def _channel_with(messages, async_iter):
     return channel
 
 
+def _mime_matcher(*allowed: str):
+    """Test-only matcher: accept only attachments whose raw ``content_type`` matches."""
+    allowed_set = set(allowed)
+    return lambda att, _msg: att.content_type in allowed_set
+
+
 # --- _stream_response ------------------------------------------------------
 
 
@@ -125,7 +135,7 @@ class TestMembers:
         async for member in _members(
             session,
             channel,
-            {"image/png"},
+            _mime_matcher("image/png"),
             chunk_size=64,
         ):
             # Drain the chunks generator inside the member tuple so the
@@ -152,7 +162,10 @@ class TestMembers:
         channel = _channel_with([msg], async_iter)
 
         members = [
-            m async for m in _members(session, channel, {"image/png"}, chunk_size=64)
+            m
+            async for m in _members(
+                session, channel, _mime_matcher("image/png"), chunk_size=64
+            )
         ]
 
         # No member tuple yielded → no zip entry created downstream.
@@ -172,19 +185,21 @@ class TestMembers:
         channel = _channel_with([msg], async_iter)
 
         members = [
-            m async for m in _members(session, channel, {"image/png"}, chunk_size=64)
+            m
+            async for m in _members(
+                session, channel, _mime_matcher("image/png"), chunk_size=64
+            )
         ]
 
         assert members == []
 
-    async def test_skips_disallowed_content_type_without_request(
+    async def test_non_matching_attachment_does_not_request(
         self,
         async_iter,
         make_attachment,
         make_message,
     ):
-        # No HTTP call should happen for an attachment whose content type
-        # isn't in the allowed set.
+        # The matcher rejects this attachment, so no HTTP call must happen.
         session = MagicMock()
         session.get = MagicMock(side_effect=AssertionError("should not be called"))
         att = make_attachment(content_type="text/plain")
@@ -192,18 +207,21 @@ class TestMembers:
         channel = _channel_with([msg], async_iter)
 
         members = [
-            m async for m in _members(session, channel, {"image/png"}, chunk_size=64)
+            m
+            async for m in _members(
+                session, channel, _mime_matcher("image/png"), chunk_size=64
+            )
         ]
 
         assert members == []
 
-    async def test_allowed_types_none_accepts_everything(
+    async def test_matches_none_accepts_everything(
         self,
         async_iter,
         make_attachment,
         make_message,
     ):
-        # allowed_types=None means accept all content types.
+        # matches=None means "no filtering" — every attachment goes through.
         resp = _make_response(chunks=(b"x",))
         session = _make_session(resp)
         att = make_attachment(content_type="text/plain", filename="weird.txt")
@@ -218,31 +236,42 @@ class TestMembers:
 
         assert len(members) == 1
 
-    async def test_strips_content_type_parameters_before_match(
+    async def test_forwards_before_and_after_to_channel_history(
         self,
         async_iter,
-        make_attachment,
-        make_message,
     ):
-        # "image/png; charset=utf-8" should match the {"image/png"} filter.
-        resp = _make_response(chunks=(b"x",))
-        session = _make_session(resp)
-        att = make_attachment(content_type="image/png; charset=utf-8")
-        msg = make_message(attachments=(att,))
-        channel = _channel_with([msg], async_iter)
+        # The history walk must be bounded by the resolved date window so
+        # Discord does the date pruning for us instead of us walking the
+        # entire channel and filtering client-side.
+        session = MagicMock()
+        channel = _channel_with([], async_iter)
+        before = datetime(2026, 5, 13, tzinfo=UTC)
+        after = datetime(2026, 5, 1, tzinfo=UTC)
 
-        members = []
-        async for member in _members(
-            session,
-            channel,
-            {"image/png"},
-            chunk_size=64,
-        ):
-            async for _ in member[4]:
-                pass
-            members.append(member)
+        _ = [
+            m
+            async for m in _members(
+                session,
+                channel,
+                None,
+                chunk_size=64,
+                before=before,
+                after=after,
+            )
+        ]
 
-        assert len(members) == 1
+        channel.history.assert_called_once_with(limit=None, before=before, after=after)
+
+    async def test_omits_before_after_when_unset(self, async_iter):
+        # When no date bounds are provided, channel.history must receive
+        # only `limit=None` — passing `before=None` / `after=None`
+        # explicitly would change discord.py's behaviour vs omission.
+        session = MagicMock()
+        channel = _channel_with([], async_iter)
+
+        _ = [m async for m in _members(session, channel, None, chunk_size=64)]
+
+        channel.history.assert_called_once_with(limit=None)
 
 
 # --- build_zip_stream end-to-end ------------------------------------------
@@ -284,7 +313,7 @@ class TestBuildZipStream:
         stream = build_zip_stream(
             session,
             channel,
-            allowed_types={"image/png"},
+            matches=_mime_matcher("image/png"),
             chunk_size=64,
         )
         buf, _sizes = await _drain_to_buffer(stream)
@@ -319,7 +348,7 @@ class TestBuildZipStream:
         stream = build_zip_stream(
             session,
             channel,
-            allowed_types={"image/png"},
+            matches=_mime_matcher("image/png"),
             chunk_size=chunk_size,
         )
         _buf, sizes = await _drain_to_buffer(stream)
@@ -340,10 +369,29 @@ class TestBuildZipStream:
         stream = build_zip_stream(
             session,
             channel,
-            allowed_types=None,
+            matches=None,
             chunk_size=64,
         )
         buf, _sizes = await _drain_to_buffer(stream)
 
         with ZipFile(buf) as zf:
             assert zf.namelist() == []
+
+    async def test_before_after_kwargs_forward_to_history(self, async_iter):
+        # build_zip_stream is the public entry; ensure date bounds make
+        # it through into the channel.history call.
+        session = MagicMock()
+        channel = _channel_with([], async_iter)
+        before = datetime(2026, 5, 10, tzinfo=UTC)
+        after = datetime(2026, 5, 1, tzinfo=UTC)
+
+        stream = build_zip_stream(
+            session,
+            channel,
+            before=before,
+            after=after,
+            chunk_size=64,
+        )
+        await _drain_to_buffer(stream)
+
+        channel.history.assert_called_once_with(limit=None, before=before, after=after)

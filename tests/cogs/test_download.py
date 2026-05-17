@@ -12,9 +12,9 @@ import pytest
 from downloader_bot.cogs.download import Download
 
 
-async def _invoke(cog, ctx, only_me=False):
+async def _invoke(cog, ctx, **kwargs):
     """Call the cog's command callback directly, bypassing the discord.py decorator."""
-    await cog.download.callback(cog, ctx, only_me=only_me)
+    await cog.download.callback(cog, ctx, **kwargs)
 
 
 def _last_embed(ctx):
@@ -74,7 +74,7 @@ class TestEnqueueHappyPath:
     ):
         cog = Download(mock_bot)
 
-        await _invoke(cog, mock_context, only_me=False)
+        await _invoke(cog, mock_context, dm_me=False)
 
         mock_kiq.assert_awaited_once()
         # Taskiq uses typed kwargs, not a payload dict.
@@ -82,7 +82,8 @@ class TestEnqueueHappyPath:
             "channel_id": 555,
             "user_id": 42,
             "guild_id": 12345,
-            "only_me": False,
+            "dm_me": False,
+            "filters": None,
         }
         embed = _last_embed(mock_context)
         assert embed.title == "Download queued"
@@ -90,8 +91,8 @@ class TestEnqueueHappyPath:
         assert "task-abc" in embed.footer.text
 
 
-class TestOnlyMe:
-    async def test_only_me_propagates_and_makes_ack_ephemeral(
+class TestDmMe:
+    async def test_dm_me_propagates_and_makes_ack_ephemeral(
         self,
         mock_bot,
         mock_context,
@@ -99,13 +100,13 @@ class TestOnlyMe:
     ):
         cog = Download(mock_bot)
 
-        await _invoke(cog, mock_context, only_me=True)
+        await _invoke(cog, mock_context, dm_me=True)
 
         # defer + send both pass ephemeral=True.
         assert mock_context.defer.await_args.kwargs == {"ephemeral": True}
         assert mock_context.send.await_args.kwargs["ephemeral"] is True
-        # Task receives only_me=True.
-        assert mock_kiq.await_args.kwargs["only_me"] is True
+        # Task receives dm_me=True.
+        assert mock_kiq.await_args.kwargs["dm_me"] is True
 
 
 class TestDmContext:
@@ -142,7 +143,7 @@ class TestRateLimit:
 
         allow_ratelimit.assert_awaited_once()
         mock_kiq.assert_not_awaited()
-        # Rate-limit replies are always ephemeral, regardless of only_me.
+        # Rate-limit replies are always ephemeral, regardless of dm_me.
         assert mock_context.send.await_args.kwargs["ephemeral"] is True
         assert _last_embed(mock_context).title == "Rate limit reached"
 
@@ -216,7 +217,7 @@ class TestBrokerUnavailable:
         mock_bot.logger.exception.assert_called_once()
         assert _last_embed(mock_context).title == "Service unavailable"
 
-    async def test_broker_down_with_only_me_keeps_response_ephemeral(
+    async def test_broker_down_with_dm_me_keeps_response_ephemeral(
         self,
         mock_bot,
         mock_context,
@@ -229,8 +230,119 @@ class TestBrokerUnavailable:
         )
         cog = Download(mock_bot)
 
-        await _invoke(cog, mock_context, only_me=True)
+        await _invoke(cog, mock_context, dm_me=True)
 
         # Error embed is still hidden from the channel — user-requested
         # privacy preserved even on the failure path.
         assert mock_context.send.await_args.kwargs["ephemeral"] is True
+
+
+class TestFilterValidation:
+    async def test_during_with_before_rejected_before_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, during="last-week", before="7d")
+
+        mock_kiq.assert_not_awaited()
+        embed = _last_embed(mock_context)
+        assert embed.title == "Conflicting filters"
+
+    async def test_during_with_after_rejected_before_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, during="this-month", after="30d")
+
+        mock_kiq.assert_not_awaited()
+        assert _last_embed(mock_context).title == "Conflicting filters"
+
+    async def test_invalid_before_duration_rejected_before_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, before="7q")
+
+        mock_kiq.assert_not_awaited()
+        embed = _last_embed(mock_context)
+        assert embed.title == "Invalid filter"
+        # The validator's message should call out the unit it expected.
+        assert "7q" in embed.description
+
+    async def test_invalid_after_duration_rejected_before_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, after="abc")
+
+        mock_kiq.assert_not_awaited()
+        assert _last_embed(mock_context).title == "Invalid filter"
+
+
+class TestFilterPayload:
+    async def test_filters_dict_is_built_and_passed_to_kiq(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+        from_user = MagicMock()
+        from_user.id = 777
+
+        await _invoke(
+            cog,
+            mock_context,
+            media_type="image",
+            from_user=from_user,
+            after="7d",
+        )
+
+        filters_payload = mock_kiq.await_args.kwargs["filters"]
+        assert filters_payload == {
+            "category": "image",
+            "from_user_id": 777,
+            "after": "7d",
+        }
+
+    async def test_unset_filters_send_none(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        # No filter args → filters=None reaches the task. The task's
+        # `filters or {}` then takes its no-filters fast path.
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        assert mock_kiq.await_args.kwargs["filters"] is None
+
+    async def test_during_alone_sends_only_during(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+    ):
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context, during="today")
+
+        assert mock_kiq.await_args.kwargs["filters"] == {"during": "today"}

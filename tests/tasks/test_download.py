@@ -41,7 +41,8 @@ async def _call(
     channel_id: int = 555,
     user_id: int = 42,
     guild_id: int | None = 12345,
-    only_me: bool = False,
+    dm_me: bool = False,
+    filters=None,
     context,
     progress,
     client,
@@ -56,7 +57,7 @@ async def _call(
         channel_id=channel_id,
         user_id=user_id,
         guild_id=guild_id,
-        only_me=only_me,
+        dm_me=dm_me,
         context=context,
         progress=progress,
         client=client,
@@ -64,6 +65,7 @@ async def _call(
         storage=storage,
         settings_repo=settings_repo,
         redis=redis,
+        filters=filters,
     )
 
 
@@ -234,11 +236,11 @@ class TestHappyPathChannelMode:
         post_to_channel.assert_not_awaited()
 
 
-# --- only_me override ------------------------------------------------------
+# --- dm_me override ------------------------------------------------------
 
 
-class TestOnlyMeOverride:
-    async def test_only_me_forces_dm_regardless_of_guild_setting(
+class TestDmMeOverride:
+    async def test_dm_me_forces_dm_regardless_of_guild_setting(
         self,
         mock_discord_client,
         mock_aiohttp_session,
@@ -249,7 +251,7 @@ class TestOnlyMeOverride:
         ctx,
         mocker,
     ):
-        # Even with delivery_mode='channel' configured, only_me=True
+        # Even with delivery_mode='channel' configured, dm_me=True
         # short-circuits to DM. The repo should NOT be consulted in this case.
         settings_repo = make_settings_repo(
             GuildSettings(
@@ -270,7 +272,7 @@ class TestOnlyMeOverride:
         )
 
         result = await _call(
-            only_me=True,
+            dm_me=True,
             context=ctx,
             progress=progress,
             client=mock_discord_client,
@@ -628,7 +630,7 @@ class TestSettingsFlowThrough:
         ttl = mock_storage_backend.upload_and_sign.await_args.kwargs["ttl"]
         assert ttl == timedelta(hours=2)
 
-    async def test_allowed_media_types_drives_zip_filter(
+    async def test_allowed_media_types_drives_zip_matcher(
         self,
         mock_discord_client,
         mock_aiohttp_session,
@@ -639,6 +641,11 @@ class TestSettingsFlowThrough:
         ctx,
         mocker,
     ):
+        # Guild policy reaches the zip stream as a callable matcher (built
+        # by filters.resolve). We exercise the matcher directly rather
+        # than reaching into resolve's internals — the cog/task contract
+        # is "build_zip_stream receives a callable that respects the
+        # guild policy".
         settings_repo = make_settings_repo(
             GuildSettings(
                 guild_id=12345,
@@ -666,10 +673,14 @@ class TestSettingsFlowThrough:
             redis=mock_redis,
         )
 
-        allowed = build_zip_stream.call_args.kwargs["allowed_types"]
-        assert allowed == {"image/png", "video/mp4"}
+        matcher = build_zip_stream.call_args.kwargs["matches"]
+        png = MagicMock(content_type="image/png")
+        jpeg = MagicMock(content_type="image/jpeg")
+        msg = MagicMock()
+        assert matcher(png, msg) is True
+        assert matcher(jpeg, msg) is False
 
-    async def test_allowed_media_types_none_passes_none_through(
+    async def test_no_filters_no_guild_policy_matcher_accepts_everything(
         self,
         mock_discord_client,
         mock_aiohttp_session,
@@ -680,7 +691,8 @@ class TestSettingsFlowThrough:
         ctx,
         mocker,
     ):
-        # Default GuildSettings has allowed_media_types=None → no filter.
+        # Default GuildSettings has allowed_media_types=None and no
+        # per-invocation filters → matcher returns True for everything.
         mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
         mock_discord_client.fetch_channel.return_value = _messageable_channel()
         build_zip_stream = mocker.patch(
@@ -702,4 +714,110 @@ class TestSettingsFlowThrough:
             redis=mock_redis,
         )
 
-        assert build_zip_stream.call_args.kwargs["allowed_types"] is None
+        matcher = build_zip_stream.call_args.kwargs["matches"]
+        weird = MagicMock(content_type="application/x-weird")
+        assert matcher(weird, MagicMock()) is True
+        # Date bounds are absent when neither user nor guild constrains them.
+        assert build_zip_stream.call_args.kwargs["before"] is None
+        assert build_zip_stream.call_args.kwargs["after"] is None
+
+
+# --- Per-invocation filters -----------------------------------------------
+
+
+class TestFiltersFlowThrough:
+    async def test_filters_payload_narrows_matcher_and_date_bounds(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Cog passes a filters dict; the matcher must reflect it and
+        # `during` must resolve to a non-trivial (before, after) pair.
+        mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        build_zip_stream = mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+            filters={"category": "gif", "from_user_id": 42, "during": "today"},
+        )
+
+        kwargs = build_zip_stream.call_args.kwargs
+        gif_from_42 = MagicMock(content_type="image/gif")
+        msg_42 = MagicMock()
+        msg_42.author = MagicMock()
+        msg_42.author.id = 42
+        msg_99 = MagicMock()
+        msg_99.author = MagicMock()
+        msg_99.author.id = 99
+        png_from_42 = MagicMock(content_type="image/png")
+
+        assert kwargs["matches"](gif_from_42, msg_42) is True
+        assert kwargs["matches"](png_from_42, msg_42) is False
+        assert kwargs["matches"](gif_from_42, msg_99) is False
+        # `today` resolves to (start-of-day, now) — both sides set.
+        assert kwargs["before"] is not None
+        assert kwargs["after"] is not None
+        assert kwargs["after"] <= kwargs["before"]
+
+    async def test_filters_none_default_matches_today_behaviour(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Round-trip: when filters is omitted, behaviour should be the
+        # same as before the feature shipped — no date bounds, matcher
+        # only enforces the guild policy (which is None here, so it
+        # accepts everything).
+        mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        build_zip_stream = mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        kwargs = build_zip_stream.call_args.kwargs
+        assert kwargs["before"] is None
+        assert kwargs["after"] is None
+        assert (
+            kwargs["matches"](MagicMock(content_type="image/png"), MagicMock()) is True
+        )

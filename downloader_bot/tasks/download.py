@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, TypedDict
 
 import aiohttp
@@ -12,7 +12,13 @@ from taskiq import Context, TaskiqDepends
 from taskiq.depends.progress_tracker import ProgressTracker, TaskState
 
 from downloader_bot.db.guild_settings import GuildSettings, GuildSettingsRepo
-from downloader_bot.download import deliver, idempotency, zip_stream
+from downloader_bot.download import (
+    deliver,
+    filters as filters_module,
+    idempotency,
+    zip_stream,
+)
+from downloader_bot.download.filters import DownloadFilters
 from downloader_bot.storage.base import StorageBackend
 from downloader_bot.storage.exceptions import UploadError
 from downloader_bot.tq import (
@@ -61,7 +67,7 @@ async def download_channel_media(
     channel_id: int,
     user_id: int,
     guild_id: int | None,
-    only_me: bool,
+    dm_me: bool,
     context: Annotated[Context, TaskiqDepends()],
     progress: Annotated[ProgressTracker, TaskiqDepends()],
     client: Annotated[discord.Client, TaskiqDepends(get_discord_client)],
@@ -75,19 +81,22 @@ async def download_channel_media(
         TaskiqDepends(get_guild_settings_repo),
     ],
     redis: Annotated[Redis, TaskiqDepends(get_redis)],
+    filters: DownloadFilters | None = None,
 ) -> DownloadResult:
     """Stream a channel's attachments into a zip, upload, then deliver the URL.
 
     Two-phase pipeline, each phase guarded by a Redis idempotency key so a
     Taskiq retry (same ``task_id``) skips already-completed work:
 
-    1. **Upload** — walk ``channel.history()``, filter by the guild's
-       ``allowed_media_types``, stream attachments through stream-zip into
+    1. **Upload** — walk ``channel.history()`` (optionally bounded by
+       ``filters.before`` / ``filters.after``), apply the resolved matcher
+       (per-invocation filters intersected with the guild's
+       ``allowed_media_types``), stream attachments through stream-zip into
        the storage backend, and cache the SAS URL.
     2. **Deliver** — either DM the requester or post into the guild's
        configured results channel (with DM fallback).
 
-    Effective delivery mode: ``only_me=True`` forces DM; otherwise honour
+    Effective delivery mode: ``dm_me=True`` forces DM; otherwise honour
     ``GuildSettings.delivery_mode`` (defaults to ``dm`` for unconfigured
     guilds).
 
@@ -98,7 +107,7 @@ async def download_channel_media(
         guild_id: The guild the command was invoked from, or ``None`` for
             DMs. Used to look up ``GuildSettings`` (delivery mode, retention,
             media-type filter); ``None`` skips the lookup and uses defaults.
-        only_me: When ``True``, forces DM delivery regardless of guild
+        dm_me: When ``True``, forces DM delivery regardless of guild
             settings.
         context: Injected Taskiq context; ``context.message.task_id`` keys
             the idempotency entries.
@@ -112,6 +121,9 @@ async def download_channel_media(
         settings_repo: Injected per-guild settings repo.
         redis: Injected Redis client for idempotency state (app-namespaced,
             separate from the Taskiq result backend).
+        filters: Per-invocation filter payload from the cog (category,
+            author, date range). ``None`` means "no user filters — use the
+            guild policy alone."
 
     Returns:
         The archive URL and the delivery mode actually used.
@@ -128,14 +140,14 @@ async def download_channel_media(
     """
     task_id = context.message.task_id
 
-    # Resolve effective delivery mode: only_me forces DM, otherwise honour
+    # Resolve effective delivery mode: dm_me forces DM, otherwise honour
     # guild settings. Guilds without a row get safe defaults (delivery_mode='dm').
-    if guild_id is not None and not only_me:
+    if guild_id is not None and not dm_me:
         guild_settings: GuildSettings = await settings_repo.get(guild_id)
     else:
-        # DM channel or only_me override — no guild lookup needed.
+        # DM channel or dm_me override — no guild lookup needed.
         guild_settings = GuildSettings(guild_id=guild_id or 0)
-    effective_delivery_mode = "dm" if only_me else guild_settings.delivery_mode
+    effective_delivery_mode = "dm" if dm_me else guild_settings.delivery_mode
     ttl = timedelta(hours=guild_settings.retention_hours)
     ttl_seconds = int(ttl.total_seconds())
 
@@ -154,13 +166,17 @@ async def download_channel_media(
             meta={"phase": "stream", "key": key},
         )
 
+        resolved = filters_module.resolve(
+            filters,
+            guild_settings,
+            now=datetime.now(UTC),
+        )
         stream = zip_stream.build_zip_stream(
             download_session,
             channel,
-            # Apply the guild's allowed_media_types filter. None = accept all.
-            allowed_types=set(guild_settings.allowed_media_types)
-            if guild_settings.allowed_media_types is not None
-            else None,
+            matches=resolved.matches,
+            before=resolved.before,
+            after=resolved.after,
         )
 
         # try/finally with an explicit success flag is the Pythonic shape

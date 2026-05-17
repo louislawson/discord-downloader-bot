@@ -126,13 +126,13 @@ def media_download(
 def job_enqueued(
     *,
     task_id: str,
-    only_me: bool,
+    dm_me: bool,
 ) -> discord.Embed:
     """Build the ack embed shown when a /download is accepted onto the queue.
 
     Args:
         task_id: The Taskiq task ID, rendered in the footer for support traceability.
-        only_me: ``True`` when the requester chose DM-only delivery. Drives the
+        dm_me: ``True`` when the requester chose DM-only delivery. Drives the
             description wording.
 
     Returns:
@@ -143,7 +143,7 @@ def job_enqueued(
         description=(
             "Your download has been queued. The result will be sent to "
             "you via DM once it's ready."
-            if only_me
+            if dm_me
             else "Your download has been queued. You'll be notified once it's ready."
         ),
     )

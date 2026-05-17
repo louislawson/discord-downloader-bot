@@ -14,7 +14,8 @@ Public surface:
 """
 
 import logging
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable
+from datetime import datetime
 from stat import S_IFREG
 
 import aiohttp
@@ -60,8 +61,11 @@ async def _stream_response(
 async def _members(
     session: aiohttp.ClientSession,
     channel: discord.abc.Messageable,
-    allowed_types: set[str] | None,
+    matches: Callable[[discord.Attachment, discord.Message], bool] | None,
     chunk_size: int,
+    *,
+    before: datetime | None = None,
+    after: datetime | None = None,
 ):
     """Yield ``(name, mtime, mode, method, chunks)`` tuples for stream-zip.
 
@@ -70,14 +74,19 @@ async def _members(
     cleanly — no member tuple is yielded, so no empty zip entry is left
     behind.
 
-    ``allowed_types=None`` means accept all content types.
+    ``matches=None`` means accept all attachments. ``before`` / ``after``
+    are forwarded directly to ``channel.history`` for server-side date
+    pruning.
     """
-    async for message in channel.history(limit=None):
+    history_kwargs = {"limit": None}
+    if before is not None:
+        history_kwargs["before"] = before
+    if after is not None:
+        history_kwargs["after"] = after
+
+    async for message in channel.history(**history_kwargs):
         for attachment in message.attachments:
-            content_type = (
-                (attachment.content_type or "").split(";", 1)[0].strip().lower()
-            )
-            if allowed_types is not None and content_type not in allowed_types:
+            if matches is not None and not matches(attachment, message):
                 continue
 
             try:
@@ -111,12 +120,23 @@ def build_zip_stream(
     session: aiohttp.ClientSession,
     channel: discord.abc.Messageable,
     *,
-    allowed_types: set[str] | None = None,
+    matches: Callable[[discord.Attachment, discord.Message], bool] | None = None,
+    before: datetime | None = None,
+    after: datetime | None = None,
     chunk_size: int = 64 * 1024,
 ) -> AsyncIterable[bytes]:
-    """Compose the streaming-zip pipeline over a channel's allowed attachments.
+    """Compose the streaming-zip pipeline over a channel's matching attachments.
 
     Returns an async iterable of zip-encoded bytes that can be passed
     directly to the storage backend's blob-upload.
     """
-    return async_stream_zip(_members(session, channel, allowed_types, chunk_size))
+    return async_stream_zip(
+        _members(
+            session,
+            channel,
+            matches,
+            chunk_size,
+            before=before,
+            after=after,
+        )
+    )

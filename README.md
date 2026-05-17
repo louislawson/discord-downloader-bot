@@ -6,7 +6,12 @@ The bot itself only enqueues Taskiq tasks — a separate Taskiq worker (same ima
 
 ## Commands
 
-- **`/download [only_me]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. Set `only_me: true` to force private DM delivery (overrides the server's configured mode).
+- **`/download [dm_me] [media_type] [from_user] [before] [after] [during]`** — Queues a job that collects every attachment in the current channel matching the guild's `allowed_media_types` filter (defaults to all attachments), zips them, and delivers a download link. Filters:
+  - `dm_me: true` — force private DM delivery (overrides the server's configured mode) and hide the ack from the channel.
+  - `media_type` — one of `image`, `video`, `audio`, `gif`, `other`. Intersected with the guild's `allowed_media_types`.
+  - `from_user` — restrict to attachments posted by this user.
+  - `before` / `after` — relative durations (e.g. `7d`, `3w`, `2h`, `30m`) bounding the channel-history walk.
+  - `during` — named window (`today`, `yesterday`, `this-week`, `last-week`, `this-month`, `last-month`, `this-year`, `last-year`). Mutually exclusive with `before` / `after`.
 - **`/setup set | show | clear`** — Server-owner only.
   - `/setup set <delivery_mode> [results_channel] [retention_hours]` overwrites delivery settings in one shot. `delivery_mode=dm` sends to the requester; `delivery_mode=channel` posts in `results_channel` (required for that mode) and falls back to DM if the channel is unusable at delivery time. `retention_hours` controls SAS URL lifetime (default `24`).
   - `/setup show` prints this guild's current effective settings.
@@ -210,7 +215,7 @@ A few things worth knowing about the test setup:
 
 `/download` is split between the bot and a Taskiq worker process so big-channel zips outlive Discord's 15-minute interaction-token window:
 
-1. **Bot ack ([downloader_bot/cogs/download.py](downloader_bot/cogs/download.py)).** Validates the request (pre-checks `Read Message History` on the channel for the bot), then calls `download_channel_media.kiq(channel_id=..., user_id=..., guild_id=..., only_me=...)`. Taskiq publishes the task to RabbitMQ and returns an `AsyncTaskiqTask`; the cog uses its `task_id` to render the blurple "Download queued" embed.
+1. **Bot ack ([downloader_bot/cogs/download.py](downloader_bot/cogs/download.py)).** Validates the request (pre-checks `Read Message History` on the channel for the bot; parses any per-invocation filters), then calls `download_channel_media.kiq(channel_id=..., user_id=..., guild_id=..., dm_me=..., filters=...)`. Taskiq publishes the task to RabbitMQ and returns an `AsyncTaskiqTask`; the cog uses its `task_id` to render the blurple "Download queued" embed.
 2. **Worker pipeline ([downloader_bot/tasks/download.py](downloader_bot/tasks/download.py)).** A Taskiq worker pulls the task off the queue and runs two phases — each guarded by a Redis idempotency check so a retry skips already-completed work:
    1. **Upload.** Resolve the guild's settings (delivery mode, allowed-media filter, retention hours; missing rows get safe defaults). Walk channel history via [`build_zip_stream`](downloader_bot/download/zip_stream.py) — an async iterable of zip-encoded bytes that composes `channel.history()` → aiohttp chunked GETs → `stream-zip`'s async generator. Feed the iterable directly to [`StorageBackend.upload_and_sign`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs), passing both a stable storage key (`channel-{channel_id}-{task_id}.zip`) and a friendly `download_filename` (e.g. `channel-general-2026-05-09.zip`) which the backend encodes into the SAS as a Content-Disposition override. A `try/finally` guarantees partial blobs are best-effort cleaned up on any failure path (including cancellation).
    2. **Deliver.** If the guild's mode is `channel` and a results channel is set, post the SAS URL there (mentioning the requester); otherwise DM the requester. Channel posts fall back to DM if the channel is missing, the bot lacks permission, or the channel isn't `Messageable`. The "delivered" marker is set **after** the send returns, so a crash mid-send re-delivers on retry (duplicate DM beats no DM).
