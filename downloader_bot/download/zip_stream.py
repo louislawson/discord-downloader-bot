@@ -180,8 +180,12 @@ def build_zip_stream(
     Args:
         session: aiohttp session reused across all attachment GETs.
         channel: Discord channel whose history is walked.
-        allowed_types: Content types accepted into the archive. ``None``
-            accepts every content type.
+        matches: Predicate invoked per ``(attachment, message)`` to decide
+            inclusion. ``None`` accepts every attachment.
+        before: Upper-bound timestamp forwarded to ``channel.history`` for
+            server-side date pruning. ``None`` means no upper bound.
+        after: Lower-bound timestamp forwarded to ``channel.history`` for
+            server-side date pruning. ``None`` means no lower bound.
         chunk_size: Bytes per HTTP read from the CDN; also caps in-flight
             memory per attachment.
 
