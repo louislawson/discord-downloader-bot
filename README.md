@@ -12,6 +12,8 @@ The bot itself only enqueues Taskiq tasks — a separate Taskiq worker (same ima
   - `from_user` — restrict to attachments posted by this user.
   - `before` / `after` — relative durations (e.g. `7d`, `3w`, `2h`, `30m`) bounding the channel-history walk.
   - `during` — named window (`today`, `yesterday`, `this-week`, `last-week`, `this-month`, `last-month`, `this-year`, `last-year`). Mutually exclusive with `before` / `after`.
+- **`/status [task_id]`** — Show the current state of a download job. With no arguments, looks up your most recent active job; with a `task_id` (copied from a `/download` "Download queued" embed footer), shows that specific job. Renders an embed with phase (`Queued` / `Worker picked it up` / `Streaming attachments` / `Uploading & delivering` / `Delivered` / `Cancelled`), a heartbeat ("3s ago" from the worker's last progress tick), a snowflake-derived "~X% through channel history" position estimate (where it can be computed), and a running tally ("12 attachments, 84 MB"). Replies are always ephemeral.
+- **`/cancel [task_id]`** — Call off an in-flight or queued download. Defaults to your latest active job; accepts an explicit `task_id` for older ones. Cancellation is terminal on the first worker pickup — the partial archive is best-effort cleaned up. If the worker hadn't started yet AND the original enqueue consumed a per-guild rate-limit token, that token is refunded so a mistaken `/download` against the wrong channel doesn't penalise the retry. Authorization: the requester can always cancel their own job; a guild owner can cancel any job in their guild; the bot owner can cancel anything. Anyone else (including a leaked `task_id` from a public channel) gets the same generic "Job not found" response — deliberate, so leaked IDs can't be used to probe. Replies are always ephemeral.
 - **`/setup set | show | clear`** — Server-owner only.
   - `/setup set <delivery_mode> [results_channel] [retention_hours]` overwrites delivery settings in one shot. `delivery_mode=dm` sends to the requester; `delivery_mode=channel` posts in `results_channel` (required for that mode) and falls back to DM if the channel is unusable at delivery time. `retention_hours` controls SAS URL lifetime (default `24`).
   - `/setup show` prints this guild's current effective settings.
@@ -115,12 +117,13 @@ downloader-bot/
 ├── downloader_bot/         # Application package — drop new modules here
 │   ├── bot.py              # Bot entry point: gateway client, cog loader, global error handler
 │   ├── config.py           # pydantic-settings singleton loaded from .env
-│   ├── embeds.py           # success/error/info/media_download/no_attachments/job_enqueued embed helpers
+│   ├── embeds.py           # success/error/info + media_download/no_attachments/job_enqueued/job_status/job_cancelled/job_not_found helpers
 │   ├── logging_setup.py    # init_logger() — one place to configure log format + level
 │   ├── presence.py         # Status strings + the no-repeat picker used by bot.status_task
 │   ├── tq.py               # Taskiq broker, scheduler, cancellation backend, worker startup hooks, typed dependency providers
 │   ├── cogs/
-│   │   ├── download.py     # /download — validates and enqueues, replies with a "queued" ack
+│   │   ├── download.py     # /download — validates, enqueues, records the job in the user→jobs index, replies with a "queued" ack
+│   │   ├── jobs.py         # /status + /cancel — read job state, request cancellation, refund rate-limit token when due
 │   │   ├── setup.py        # /setup — server-owner-only per-guild delivery config
 │   │   ├── general.py      # /invite — DMs the configured INVITE_LINK
 │   │   └── owner.py        # <PREFIX>sync (slash-command registration)
@@ -128,9 +131,12 @@ downloader-bot/
 │   │   ├── __init__.py     # Re-exports download_channel_media for Taskiq worker discovery
 │   │   └── download.py     # download_channel_media — the two-phase orchestration (upload → deliver)
 │   ├── download/
-│   │   ├── zip_stream.py   # build_zip_stream — async iterable of zip-encoded bytes
+│   │   ├── zip_stream.py   # build_zip_stream — async iterable of zip-encoded bytes; on_progress callback for /status heartbeat
 │   │   ├── deliver.py      # dm_user + post_to_channel (with DM fallback)
+│   │   ├── filters.py      # /download per-invocation filters (media_type/from_user/before/after/during) + guild-policy compose seam
 │   │   ├── idempotency.py  # Redis-backed phase guards keyed on Taskiq task_id
+│   │   ├── jobs.py         # Redis user→jobs index (task:{id}:meta + user:{id}:active_jobs) for /status and /cancel
+│   │   ├── ratelimit.py    # Per-guild token bucket for /download enqueues; refund() for /cancel
 │   │   └── discord_rest.py # REST-only Discord client factory (login(), no gateway)
 │   ├── worker/
 │   │   └── healthcheck.py  # HeartbeatMiddleware + CLI probe used by the compose HEALTHCHECK
@@ -220,7 +226,9 @@ A few things worth knowing about the test setup:
    1. **Upload.** Resolve the guild's settings (delivery mode, allowed-media filter, retention hours; missing rows get safe defaults). Walk channel history via [`build_zip_stream`](downloader_bot/download/zip_stream.py) — an async iterable of zip-encoded bytes that composes `channel.history()` → aiohttp chunked GETs → `stream-zip`'s async generator. Feed the iterable directly to [`StorageBackend.upload_and_sign`](downloader_bot/storage/base.py) (Azure today; S3/GCS in scope for future PRs), passing both a stable storage key (`channel-{channel_id}-{task_id}.zip`) and a friendly `download_filename` (e.g. `channel-general-2026-05-09.zip`) which the backend encodes into the SAS as a Content-Disposition override. A `try/finally` guarantees partial blobs are best-effort cleaned up on any failure path (including cancellation). If the channel yields no matching attachments (empty / fully filtered / all pre-flights failed), `build_zip_stream` raises `NoMatchingAttachments` before any blob bytes commit and the task caches an empty-string sentinel under the idempotency key so retries skip the history walk.
    2. **Deliver.** Build the embed — the green archive-link embed when the upload produced a URL, the red "No media found" embed when the upload short-circuited as empty. If the guild's mode is `channel` and a results channel is set, post the embed there; otherwise DM the requester. Channel posts fall back to DM if the channel is missing, the bot lacks permission, or the channel isn't `Messageable`. The "delivered" marker is set **after** the send returns, so a crash mid-send re-delivers on retry (duplicate DM beats no DM).
 
-Errors are handled close to their source: storage failures raise typed exceptions from [downloader_bot/storage/exceptions.py](downloader_bot/storage/exceptions.py); mid-flight attachment HTTP failures raise [`AttachmentStreamError`](downloader_bot/download/zip_stream.py); DM-disabled users raise [`DMUnavailable`](downloader_bot/download/deliver.py). Anything unexpected propagates out of the task; Taskiq's `SimpleRetryMiddleware` retries it (up to 3 times) under the same `task_id`, and the idempotency layer makes that safe.
+Errors are handled close to their source: storage failures raise typed exceptions from [downloader_bot/storage/exceptions.py](downloader_bot/storage/exceptions.py); mid-flight attachment HTTP failures raise [`AttachmentStreamError`](downloader_bot/download/zip_stream.py); DM-disabled users raise [`DMUnavailable`](downloader_bot/download/deliver.py). Anything unexpected propagates out of the task; Taskiq's retry middleware (the `CancelAwareRetryMiddleware` in [downloader_bot/tq.py](downloader_bot/tq.py), a tiny subclass of `SimpleRetryMiddleware`) retries it up to 3 times under the same `task_id`, and the idempotency layer makes that safe. Cancellation via `/cancel` is the one exception that short-circuits the retry path — `CancelAwareRetryMiddleware` treats `TaskCancellationException` as terminal so the user's cancel intent is one-and-done, not a 3x retry storm.
+
+`/status` and `/cancel` ([downloader_bot/cogs/jobs.py](downloader_bot/cogs/jobs.py)) ride on top of two extra Redis surfaces alongside the existing idempotency keys. At enqueue time the cog calls [`jobs.record_job`](downloader_bot/download/jobs.py) to register `(task_id → JobMeta)` and `(user_id → ZSET of active task_ids)` atomically (`pipeline(transaction=True)`); TTL matches the per-guild SAS retention so the index expires alongside the archive. The task body emits `progress.set_progress(meta={"phase": "picked_up"})` as its very first line so the cancel path can distinguish "still queued in RabbitMQ" from "worker has the job" — the first state refunds the rate-limit token (if one was consumed) and aborts cleanly, the second cancels through the cancellation backend and lets the task's existing `try/finally` clean any partial blob. The task's success path also calls [`jobs.forget_job`](downloader_bot/download/jobs.py) so finished jobs stop showing up in `/status`. `/status` itself reads from `task.is_ready()` + `task.get_progress()` (cheap, non-destructive) and renders an embed whose fields (phase, heartbeat, position, tally) are conditionally populated from whatever progress meta is available.
 
 Bot-side command errors are translated to user-facing embeds by a global handler in [downloader_bot/bot.py](downloader_bot/bot.py) using the helpers in [downloader_bot/embeds.py](downloader_bot/embeds.py), so cogs raise typed exceptions rather than formatting messages themselves. The `downloader_bot/cogs/setup.py` cog adds a cog-local handler for its custom `NotGuildOwner` check.
 
