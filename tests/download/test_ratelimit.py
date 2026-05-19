@@ -131,3 +131,62 @@ class TestTTL:
         ttl = await redis.ttl("ratelimit:guild:1")
         # _ttl_seconds(2, 5) = max(3600, 1440 * 2) = 3600.
         assert 0 < ttl <= 3600
+
+
+class TestRefund:
+    async def test_acquire_refund_round_trips_to_full_capacity(self, redis):
+        # Acquire once (capacity 2 → 1 left), then refund → back to 2.
+        await ratelimit.acquire(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        await ratelimit.refund(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        tokens = float(await redis.hget("ratelimit:guild:1", "tokens"))
+        assert tokens == pytest.approx(2.0)
+
+    async def test_refund_lets_exhausted_bucket_acquire_again(self, redis):
+        # Two acquires drain capacity=2 to 0; third would be denied.
+        await ratelimit.acquire(redis, guild_id=1, capacity=2, refill_per_hour=5)
+        await ratelimit.acquire(redis, guild_id=1, capacity=2, refill_per_hour=5)
+        denied, _ = await ratelimit.acquire(
+            redis, guild_id=1, capacity=2, refill_per_hour=5
+        )
+        assert denied is False
+
+        # One refund → next acquire should succeed.
+        await ratelimit.refund(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        allowed, _ = await ratelimit.acquire(
+            redis, guild_id=1, capacity=2, refill_per_hour=5
+        )
+        assert allowed is True
+
+    async def test_refund_of_absent_bucket_is_noop(self, redis):
+        # No bucket key yet — TTL evicted, user has fully recovered.
+        # Refund must not write a fresh row (that would let a refund
+        # silently bump a brand-new user above capacity).
+        await ratelimit.refund(redis, guild_id=999, capacity=2, refill_per_hour=5)
+
+        assert await redis.exists("ratelimit:guild:999") == 0
+
+    async def test_refund_at_capacity_is_noop(self, redis):
+        # Acquire then refund leaves tokens=2; a second refund must NOT
+        # push beyond capacity.
+        await ratelimit.acquire(redis, guild_id=1, capacity=2, refill_per_hour=5)
+        await ratelimit.refund(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        await ratelimit.refund(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        tokens = float(await redis.hget("ratelimit:guild:1", "tokens"))
+        assert tokens == pytest.approx(2.0)
+
+    async def test_refund_refreshes_ttl(self, redis):
+        await ratelimit.acquire(redis, guild_id=1, capacity=2, refill_per_hour=5)
+        # Drop TTL to a tiny value so the refund must reset it.
+        await redis.expire("ratelimit:guild:1", 5)
+        assert await redis.ttl("ratelimit:guild:1") <= 5
+
+        await ratelimit.refund(redis, guild_id=1, capacity=2, refill_per_hour=5)
+
+        ttl = await redis.ttl("ratelimit:guild:1")
+        # Same _ttl_seconds(2, 5) = 3600 ceiling.
+        assert ttl > 5

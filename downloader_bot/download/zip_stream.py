@@ -15,13 +15,17 @@ Public surface:
   attachments filtered by ``allowed_types``, or all pre-flight GETs
   failed). Lets the worker short-circuit and surface a user-facing error
   instead of uploading a valid-but-empty zip.
+- ``ProgressSnapshot`` — payload handed to the ``on_progress`` callback
+  on every throttled tick.
 - ``build_zip_stream`` — factory returning the ``AsyncIterable[bytes]``.
 """
 
 import logging
-from collections.abc import AsyncIterable, AsyncIterator, Callable
+import time
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from stat import S_IFREG
+from typing import TypedDict
 
 import aiohttp
 import discord
@@ -49,6 +53,72 @@ class NoMatchingAttachments(Exception):
     catches this as a known terminal state and notifies the user instead
     of uploading an empty-central-directory zip.
     """
+
+
+class ProgressSnapshot(TypedDict):
+    """Per-tick progress payload handed to ``on_progress``.
+
+    ``attachments_done`` is the count of matching attachments whose
+    member tuple has been yielded (so they're committed to the zip).
+    ``bytes_streamed`` is the running sum of ``attachment.size`` for
+    those — Discord-reported sizes, not bytes actually sent over the
+    wire, but accurate enough for a UI tally.
+    ``history_fraction`` is the position of the message *currently being
+    walked* within the bounded snowflake range — 0.0 at the start of the
+    walk (newest), 1.0 at the end (oldest). ``None`` when either bound
+    couldn't be resolved (no ``after`` arg and the oldest-message lookup
+    failed) — distinguishes "we don't know" from "we're at the start."
+    """
+
+    attachments_done: int
+    bytes_streamed: int
+    history_fraction: float | None
+
+
+def _compute_history_fraction(current_id: int, low: int, high: int) -> float:
+    """Fraction of the walk completed (0.0 at newest, 1.0 at oldest).
+
+    discord.py walks ``channel.history`` newest-first by default, so the
+    first message we see has a snowflake near ``high`` and the last
+    near ``low``.
+    """
+    if high <= low:
+        return 1.0
+    return max(0.0, min(1.0, (high - current_id) / (high - low)))
+
+
+async def _resolve_snowflake_bounds(
+    channel: discord.abc.Messageable,
+    *,
+    before: datetime | None,
+    after: datetime | None,
+) -> tuple[int | None, int | None]:
+    """Return ``(low, high)`` snowflakes for the bounded walk.
+
+    ``high`` comes from ``before`` (date→snowflake) or
+    ``channel.last_message_id`` (free, already cached on the channel
+    object). ``low`` comes from ``after`` (date→snowflake) or one
+    ``channel.history(limit=1, oldest_first=True)`` call when the scan
+    is fully unbounded — best-effort; if it fails we return ``None`` and
+    the caller reports ``history_fraction=0.0`` for the whole walk.
+    """
+    high = (
+        discord.utils.time_snowflake(before, high=True)
+        if before is not None
+        else getattr(channel, "last_message_id", None)
+    )
+    if after is not None:
+        low = discord.utils.time_snowflake(after, high=False)
+    else:
+        low = None
+        try:
+            async for msg in channel.history(limit=1, oldest_first=True):
+                low = msg.id
+                break
+        except Exception as exc:
+            logger.warning("oldest-message lookup failed: %s", exc)
+            low = None
+    return low, high
 
 
 async def _stream_response(
@@ -83,6 +153,8 @@ async def _members(
     *,
     before: datetime | None = None,
     after: datetime | None = None,
+    on_progress: Callable[[ProgressSnapshot], Awaitable[None]] | None = None,
+    progress_throttle_seconds: float = 5.0,
 ):
     """Yield ``(name, mtime, mode, method, chunks)`` tuples for stream-zip.
 
@@ -94,6 +166,12 @@ async def _members(
     ``matches=None`` means accept all attachments. ``before`` / ``after``
     are forwarded directly to ``channel.history`` for server-side date
     pruning.
+
+    If ``on_progress`` is provided, it's called on every message scanned
+    (throttled to once every ``progress_throttle_seconds`` of wall-clock)
+    so filter-stall stretches that yield no attachments still tick the
+    heartbeat. The throttle check is synchronous — only the actual emit
+    pays coroutine-scheduling cost.
     """
     history_kwargs = {"limit": None}
     if before is not None:
@@ -101,7 +179,41 @@ async def _members(
     if after is not None:
         history_kwargs["after"] = after
 
+    low_snowflake = high_snowflake = None
+    if on_progress is not None:
+        low_snowflake, high_snowflake = await _resolve_snowflake_bounds(
+            channel,
+            before=before,
+            after=after,
+        )
+
+    attachments_done = 0
+    bytes_streamed = 0
+    last_emit = time.monotonic()
+
     async for message in channel.history(**history_kwargs):
+        if on_progress is not None:
+            now = time.monotonic()
+            if (now - last_emit) >= progress_throttle_seconds:
+                last_emit = now
+                fraction: float | None = (
+                    _compute_history_fraction(message.id, low_snowflake, high_snowflake)
+                    if low_snowflake is not None and high_snowflake is not None
+                    else None
+                )
+                try:
+                    await on_progress(
+                        ProgressSnapshot(
+                            attachments_done=attachments_done,
+                            bytes_streamed=bytes_streamed,
+                            history_fraction=fraction,
+                        )
+                    )
+                except Exception as exc:
+                    # Progress is best-effort; a Redis blip shouldn't kill
+                    # an in-flight zip job. Log and continue.
+                    logger.warning("progress callback failed: %s", exc)
+
         for attachment in message.attachments:
             if matches is not None and not matches(attachment, message):
                 continue
@@ -124,6 +236,8 @@ async def _members(
                 resp.release()
                 continue
 
+            attachments_done += 1
+            bytes_streamed += getattr(attachment, "size", 0) or 0
             yield (
                 f"{message.id}_{attachment.filename}",
                 message.created_at,
@@ -174,6 +288,8 @@ def build_zip_stream(
     before: datetime | None = None,
     after: datetime | None = None,
     chunk_size: int = 64 * 1024,
+    on_progress: Callable[[ProgressSnapshot], Awaitable[None]] | None = None,
+    progress_throttle_seconds: float = 5.0,
 ) -> AsyncIterable[bytes]:
     """Compose the streaming-zip pipeline over a channel's matching attachments.
 
@@ -188,6 +304,12 @@ def build_zip_stream(
             server-side date pruning. ``None`` means no lower bound.
         chunk_size: Bytes per HTTP read from the CDN; also caps in-flight
             memory per attachment.
+        on_progress: Optional async callback invoked with a
+            ``ProgressSnapshot`` on every message scanned, throttled to
+            ``progress_throttle_seconds``. Fires per *message*, not per
+            attachment, so filter-stall stretches still tick the heartbeat.
+        progress_throttle_seconds: Wall-clock interval between progress
+            ticks. Default 5s.
 
     Returns:
         An async iterable of zip-encoded bytes ready to feed to the
@@ -210,6 +332,8 @@ def build_zip_stream(
                 chunk_size,
                 before=before,
                 after=after,
+                on_progress=on_progress,
+                progress_throttle_seconds=progress_throttle_seconds,
             )
         )
     )

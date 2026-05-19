@@ -17,12 +17,14 @@ from discord.ext.commands import Context
 from taskiq import AsyncTaskiqTask
 
 from downloader_bot.config import settings
-from downloader_bot.download import ratelimit
+from downloader_bot.db.guild_settings import GuildSettings
+from downloader_bot.download import jobs, ratelimit
 from downloader_bot.download.filters import (
     DownloadFilters,
     FilterParseError,
     parse_duration,
 )
+from downloader_bot.download.jobs import JobMeta
 from downloader_bot.embeds import error, job_enqueued
 from downloader_bot.tasks.download import DownloadResult, download_channel_media
 
@@ -151,6 +153,9 @@ class Download(commands.Cog, name="download"):
         # Per-guild rate limit. Owner bypass; DM-context /download has no
         # guild to rate-limit, so the check is skipped. Reply is always
         # ephemeral so a rate-limit hit doesn't itself spam the channel.
+        # The cancel path needs to know whether we actually consumed a
+        # token here (so it can refund only when a refund is due).
+        consumed_token = False
         if context.guild and context.author.id != context.guild.owner_id:
             allowed, retry_after = await ratelimit.acquire(
                 self.bot.redis,
@@ -171,6 +176,7 @@ class Download(commands.Cog, name="download"):
                     ephemeral=True,
                 )
                 return
+            consumed_token = True
 
         filters_payload = _build_filters(
             media_type=media_type,
@@ -218,6 +224,38 @@ class Download(commands.Cog, name="download"):
             dm_me,
             filters_payload,
         )
+
+        # Register the job in the user→jobs index so /status and /cancel
+        # can find it. TTL matches the per-guild SAS retention so the
+        # index expires alongside the archive URL. DM-context has no
+        # guild row → fall back to the GuildSettings default (24h).
+        if context.guild is not None:
+            guild_settings = await self.bot.guild_settings_repo.get(context.guild.id)
+        else:
+            guild_settings = GuildSettings(guild_id=0)
+        ttl_seconds = guild_settings.retention_hours * 3600
+        meta = JobMeta(
+            owner_user_id=context.author.id,
+            guild_id=context.guild.id if context.guild else None,
+            channel_id=context.channel.id,
+            enqueued_at_iso=datetime.now(UTC).isoformat(),
+            enqueue_consumed_token=consumed_token,
+        )
+        try:
+            await jobs.record_job(
+                self.bot.redis,
+                task.task_id,
+                meta=meta,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception as exc:
+            # Best-effort: a Redis blip here costs /status visibility for
+            # this one job, but the worker will still deliver normally.
+            self.bot.logger.warning(
+                "record_job failed for task %s: %s",
+                task.task_id,
+                exc,
+            )
 
         await context.send(
             embed=job_enqueued(task_id=task.task_id, dm_me=dm_me),

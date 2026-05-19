@@ -12,7 +12,7 @@ plain mocks.
 """
 
 from contextlib import AsyncExitStack
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import aiohttp
 import discord
@@ -23,6 +23,7 @@ from taskiq.middlewares.taskiq_admin_middleware import TaskiqAdminMiddleware
 from taskiq.schedule_sources import LabelScheduleSource
 from taskiq_aio_pika import AioPikaBroker
 from taskiq_cancellation import ModularCancellationBackend
+from taskiq_cancellation.exceptions import TaskCancellationException
 from taskiq_cancellation.notifiers.aiopika import AioPikaNotifier
 from taskiq_cancellation.state_holders.redis import RedisCancellationStateHolder
 from taskiq_redis import RedisAsyncResultBackend, RedisScheduleSource
@@ -34,6 +35,34 @@ from downloader_bot.download.discord_rest import close_client, open_client
 from downloader_bot.storage import get_storage_backend
 from downloader_bot.storage.base import StorageBackend
 from downloader_bot.worker.healthcheck import HeartbeatMiddleware
+
+if TYPE_CHECKING:
+    from taskiq import TaskiqMessage, TaskiqResult
+
+
+class CancelAwareRetryMiddleware(SimpleRetryMiddleware):
+    """``SimpleRetryMiddleware`` that treats /cancel as terminal.
+
+    Without this, ``/cancel`` flips the cancellation-state flag and the
+    next worker pickup raises ``TaskCancellationException`` before the
+    task body runs. ``SimpleRetryMiddleware`` then sees the exception
+    and re-kicks the same task_id — which the cancellable wrapper
+    cancels again, ad nauseam, up to ``default_retry_count`` log-spammy
+    failures before giving up. The user-intended terminal state
+    (cancelled) should be terminal on the first hit.
+    """
+
+    async def on_error(
+        self,
+        message: "TaskiqMessage",
+        result: "TaskiqResult[Any]",
+        exception: BaseException,
+    ) -> None:
+        """Skip the retry path for cancellation; defer to super for everything else."""
+        if isinstance(exception, TaskCancellationException):
+            return
+        await super().on_error(message, result, exception)
+
 
 broker = (
     AioPikaBroker(
@@ -53,7 +82,7 @@ broker = (
             taskiq_broker_name=settings.TASKIQ_ADMIN_BROKER_NAME or "",
         ),
         HeartbeatMiddleware(redis_url=settings.REDIS_URL),
-        SimpleRetryMiddleware(default_retry_count=3),
+        CancelAwareRetryMiddleware(default_retry_count=3),
     )
 )
 

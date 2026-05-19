@@ -217,6 +217,101 @@ class TestBrokerUnavailable:
         mock_bot.logger.exception.assert_called_once()
         assert _last_embed(mock_context).title == "Service unavailable"
 
+
+class TestRecordJob:
+    async def test_records_job_with_consumed_token_for_regular_user(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        mock_record_job,
+    ):
+        # Regular user (author 42, owner 999) → rate-limit acquire runs,
+        # so enqueue_consumed_token must be True in the recorded meta.
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        mock_record_job.assert_awaited_once()
+        meta = mock_record_job.await_args.kwargs["meta"]
+        assert meta["owner_user_id"] == 42
+        assert meta["guild_id"] == 12345
+        assert meta["channel_id"] == 555
+        assert meta["enqueue_consumed_token"] is True
+
+    async def test_guild_owner_bypass_records_consumed_token_false(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        mock_record_job,
+    ):
+        # Guild owner = author → rate-limit skipped → no token consumed.
+        # The cancel path uses this flag to skip the refund.
+        mock_context.guild.owner_id = mock_context.author.id
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        meta = mock_record_job.await_args.kwargs["meta"]
+        assert meta["enqueue_consumed_token"] is False
+
+    async def test_dm_context_records_guild_id_none_and_no_token(
+        self,
+        mock_bot,
+        dm_context,
+        mock_kiq,
+        mock_record_job,
+    ):
+        # DM context → no guild bucket to consume → guild_id None,
+        # enqueue_consumed_token False (cancel skips refund cleanly).
+        cog = Download(mock_bot)
+
+        await _invoke(cog, dm_context)
+
+        meta = mock_record_job.await_args.kwargs["meta"]
+        assert meta["guild_id"] is None
+        assert meta["enqueue_consumed_token"] is False
+
+    async def test_ttl_seconds_matches_guild_retention(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        mock_record_job,
+    ):
+        # Bump retention to 72h; cog must pass ttl_seconds = 72 * 3600.
+        from downloader_bot.db.guild_settings import GuildSettings
+
+        mock_bot.guild_settings_repo.get = AsyncMock(
+            return_value=GuildSettings(guild_id=12345, retention_hours=72)
+        )
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        ttl = mock_record_job.await_args.kwargs["ttl_seconds"]
+        assert ttl == 72 * 3600
+
+    async def test_record_job_failure_does_not_abort_ack(
+        self,
+        mock_bot,
+        mock_context,
+        mock_kiq,
+        mock_record_job,
+    ):
+        # Redis blip during record_job is best-effort — the worker
+        # still delivers, so the user must still get the ack embed.
+        mock_record_job.side_effect = RuntimeError("redis down")
+        cog = Download(mock_bot)
+
+        await _invoke(cog, mock_context)
+
+        mock_kiq.assert_awaited_once()
+        mock_context.send.assert_awaited_once()
+        assert _last_embed(mock_context).title == "Download queued"
+        mock_bot.logger.warning.assert_called_once()
+
     async def test_broker_down_with_dm_me_keeps_response_ephemeral(
         self,
         mock_bot,

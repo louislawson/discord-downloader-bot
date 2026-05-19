@@ -17,6 +17,7 @@ from downloader_bot.download import (
     deliver,
     filters as filters_module,
     idempotency,
+    jobs,
     zip_stream,
 )
 from downloader_bot.download.filters import DownloadFilters
@@ -51,6 +52,26 @@ class DownloadResult(TypedDict):
     url: str
     delivery_mode: str  # 'dm' or 'channel'
     status: Literal["delivered", "empty"]
+
+
+class ProgressMeta(TypedDict, total=False):
+    """Shape of the ``meta`` dict the task writes via ``progress.set_progress``.
+
+    Colocated with the writer so the reader (the /status cog) imports
+    one source of truth. ``total=False`` because each phase emits only
+    the keys it cares about — ``picked_up`` carries just ``phase``;
+    ``stream`` carries the full tally; ``deliver`` and ``done`` carry
+    just ``phase``. ``history_fraction`` is ``None`` when the
+    snowflake-bounds resolver failed (rare, fully-unbounded scan with
+    a broken oldest-message lookup) — the cog skips the "Position"
+    field in that case.
+    """
+
+    phase: Literal["picked_up", "stream", "deliver", "done"]
+    attachments_done: int
+    bytes_streamed: int
+    history_fraction: float | None
+    updated_at: str  # ISO timestamp; heartbeat
 
 
 def _display_filename(channel: discord.abc.Messageable) -> str:
@@ -154,6 +175,16 @@ async def download_channel_media(
     """
     task_id = context.message.task_id
 
+    # First thing: emit the picked-up sentinel. The /cancel cog uses
+    # "is_ready False AND get_progress None" to mean "still queued in
+    # RabbitMQ" for the refund decision; emitting *any* progress here
+    # makes that signal unambiguous (otherwise the cog would refund a
+    # token even while the worker was already fetching the channel).
+    await progress.set_progress(
+        state=TaskState.STARTED,
+        meta=ProgressMeta(phase="picked_up"),
+    )
+
     # Resolve effective delivery mode: dm_me forces DM, otherwise honour
     # guild settings. Guilds without a row get safe defaults (delivery_mode='dm').
     if guild_id is not None and not dm_me:
@@ -178,7 +209,7 @@ async def download_channel_media(
 
         await progress.set_progress(
             state=TaskState.STARTED,
-            meta={"phase": "stream", "key": key},
+            meta=ProgressMeta(phase="stream"),
         )
 
         resolved = filters_module.resolve(
@@ -186,12 +217,26 @@ async def download_channel_media(
             guild_settings,
             now=datetime.now(UTC),
         )
+
+        async def _on_progress(snapshot: zip_stream.ProgressSnapshot) -> None:
+            await progress.set_progress(
+                state=TaskState.STARTED,
+                meta=ProgressMeta(
+                    phase="stream",
+                    attachments_done=snapshot["attachments_done"],
+                    bytes_streamed=snapshot["bytes_streamed"],
+                    history_fraction=snapshot["history_fraction"],
+                    updated_at=datetime.now(UTC).isoformat(),
+                ),
+            )
+
         stream = zip_stream.build_zip_stream(
             download_session,
             channel,
             matches=resolved.matches,
             before=resolved.before,
             after=resolved.after,
+            on_progress=_on_progress,
         )
 
         # try/finally with an explicit success flag is the Pythonic shape
@@ -266,7 +311,7 @@ async def download_channel_media(
     else:
         await progress.set_progress(
             state=TaskState.STARTED,
-            meta={"phase": "deliver"},
+            meta=ProgressMeta(phase="deliver"),
         )
         embed = (
             embeds.no_attachments(requester_id=user_id)
@@ -292,7 +337,19 @@ async def download_channel_media(
         # — duplicate DM beats no DM.
         await idempotency.mark_delivered(redis, task_id, ttl_seconds)
 
-    await progress.set_progress(state=TaskState.SUCCESS, meta={"phase": "done"})
+    await progress.set_progress(
+        state=TaskState.SUCCESS,
+        meta=ProgressMeta(phase="done"),
+    )
+    # Drop the user→jobs index entry. Only on the success path — Taskiq
+    # retries with the same task_id, so forgetting on intermediate
+    # failures would make /status return "no active jobs" while a retry
+    # is still running. Best-effort: a Redis blip here doesn't undo the
+    # successful delivery.
+    try:
+        await jobs.forget_job(redis, task_id, user_id)
+    except Exception as exc:
+        logger.warning("forget_job failed for task %s: %s", task_id, exc)
     return {
         "url": archive_url,
         "delivery_mode": effective_delivery_mode,

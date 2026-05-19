@@ -29,6 +29,7 @@ import pytest
 from downloader_bot.download.zip_stream import (
     AttachmentStreamError,
     NoMatchingAttachments,
+    _compute_history_fraction,
     _members,
     _stream_response,
     build_zip_stream,
@@ -471,4 +472,391 @@ class TestBuildZipStream:
         with pytest.raises(NoMatchingAttachments):
             await _drain_to_buffer(stream)
 
-        channel.history.assert_called_once_with(limit=None, before=before, after=after)
+        # The history walk now receives two extra arguments alongside
+        # before/after: a sentinel call from _resolve_snowflake_bounds
+        # may not fire (after is set), but the main walk must still
+        # carry limit=None + the date bounds.
+        main_call = channel.history.call_args_list[-1]
+        assert main_call.kwargs == {"limit": None, "before": before, "after": after}
+
+
+# --- history-fraction math ------------------------------------------------
+
+
+class TestComputeHistoryFraction:
+    def test_at_high_end_returns_zero(self):
+        # First message of the walk is the newest → snowflake ~= high.
+        assert _compute_history_fraction(current_id=100, low=0, high=100) == 0.0
+
+    def test_at_low_end_returns_one(self):
+        # Last message of the walk is the oldest → snowflake ~= low.
+        assert _compute_history_fraction(current_id=0, low=0, high=100) == 1.0
+
+    def test_midpoint_returns_half(self):
+        assert _compute_history_fraction(current_id=50, low=0, high=100) == 0.5
+
+    def test_high_equals_low_returns_one(self):
+        # Single-message channel — denominator zero, defaults to "done."
+        assert _compute_history_fraction(current_id=42, low=42, high=42) == 1.0
+
+    def test_current_outside_range_clamps(self):
+        # current_id past the high end (or before low) shouldn't produce
+        # negative or >1 values — the embed says "~37%" so out-of-range
+        # would render as "~-15%" which is nonsense.
+        assert _compute_history_fraction(current_id=200, low=0, high=100) == 0.0
+        assert _compute_history_fraction(current_id=-50, low=0, high=100) == 1.0
+
+
+# --- on_progress callback ------------------------------------------------
+
+
+class TestOnProgress:
+    async def test_fires_per_message_scanned_with_throttle_zero(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Throttle=0 forces a tick on every message — used to assert the
+        # callback fires per *message* (not per attachment), so filter-
+        # stall stretches still tick the heartbeat.
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("filter rejects"))
+        att = make_attachment(content_type="text/plain")
+        msgs = [make_message(message_id=i, attachments=(att,)) for i in (3, 2, 1)]
+        channel = _channel_with(msgs, async_iter)
+        # Real channels return Optional[int]; the bare MagicMock default
+        # is incompatible with the snowflake-fraction math.
+        channel.last_message_id = 10
+        # Pass after= so the bounds resolver doesn't fetch oldest_first
+        # (which would consume the shared history iterator before the
+        # main walk gets to it).
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+
+        snapshots = []
+
+        async def on_progress(snapshot):
+            snapshots.append(snapshot)
+
+        members = [
+            m
+            async for m in _members(
+                session,
+                channel,
+                _mime_matcher("image/png"),  # rejects every attachment
+                chunk_size=64,
+                after=after,
+                on_progress=on_progress,
+                progress_throttle_seconds=0.0,
+            )
+        ]
+
+        assert members == []  # nothing matched, but heartbeat still ticked
+        assert len(snapshots) == 3
+        # attachments_done stays at 0 across the whole walk
+        assert all(s["attachments_done"] == 0 for s in snapshots)
+        assert all(s["bytes_streamed"] == 0 for s in snapshots)
+
+    async def test_throttle_suppresses_redundant_emits(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Throttle=999s means only the very first tick (no preceding
+        # tick) won't fire — and even that one requires monotonic to
+        # advance. Without time advancement, no ticks should fire after
+        # the first scan.
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("filter rejects"))
+        att = make_attachment(content_type="text/plain")
+        msgs = [make_message(message_id=i, attachments=(att,)) for i in (3, 2, 1)]
+        channel = _channel_with(msgs, async_iter)
+
+        snapshots = []
+
+        async def on_progress(snapshot):
+            snapshots.append(snapshot)
+
+        [
+            m
+            async for m in _members(
+                session,
+                channel,
+                _mime_matcher("image/png"),
+                chunk_size=64,
+                on_progress=on_progress,
+                progress_throttle_seconds=999.0,
+            )
+        ]
+
+        # last_emit is initialised to monotonic() at function entry, so
+        # no scan within ~999s clears the threshold. Zero emits.
+        assert snapshots == []
+
+    async def test_attachments_done_and_bytes_streamed_increment(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Real matches → attachments_done and bytes_streamed should
+        # advance as each member tuple is yielded.
+        resp_a = _make_response(chunks=(b"a",))
+        resp_b = _make_response(chunks=(b"b",))
+        session = _make_session(resp_a, resp_b)
+
+        att_a = make_attachment(filename="a.png")
+        att_a.size = 100
+        att_b = make_attachment(filename="b.png")
+        att_b.size = 200
+        msg_a = make_message(message_id=3, attachments=(att_a,))
+        msg_b = make_message(message_id=2, attachments=(att_b,))
+        channel = _channel_with([msg_a, msg_b], async_iter)
+        channel.last_message_id = 10
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+
+        snapshots = []
+
+        async def on_progress(snapshot):
+            snapshots.append(dict(snapshot))
+
+        members = []
+        async for member in _members(
+            session,
+            channel,
+            None,  # accept everything
+            chunk_size=64,
+            after=after,
+            on_progress=on_progress,
+            progress_throttle_seconds=0.0,
+        ):
+            # Drain so the inner stream completes and bytes are accounted.
+            async for _ in member[4]:
+                pass
+            members.append(member)
+
+        assert len(members) == 2
+        # By the second tick (start of second message), the first
+        # attachment has been yielded → attachments_done == 1, bytes == 100.
+        # Snapshot ordering: tick fires *before* the inner loop, so:
+        #   tick 1 (msg_a start): done=0, bytes=0
+        #   tick 2 (msg_b start): done=1, bytes=100
+        assert snapshots[0]["attachments_done"] == 0
+        assert snapshots[0]["bytes_streamed"] == 0
+        assert snapshots[1]["attachments_done"] == 1
+        assert snapshots[1]["bytes_streamed"] == 100
+
+    async def test_callback_error_does_not_kill_walk(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+        caplog,
+    ):
+        # Progress is best-effort — a Redis blip in on_progress shouldn't
+        # abort an in-flight zip job.
+        resp = _make_response(chunks=(b"x",))
+        session = _make_session(resp)
+        att = make_attachment(filename="a.png")
+        att.size = 50
+        msg = make_message(message_id=1, attachments=(att,))
+        channel = _channel_with([msg], async_iter)
+        channel.last_message_id = 10
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+
+        async def on_progress(_snapshot):
+            raise RuntimeError("redis down")
+
+        members = []
+        async for member in _members(
+            session,
+            channel,
+            None,
+            chunk_size=64,
+            after=after,
+            on_progress=on_progress,
+            progress_throttle_seconds=0.0,
+        ):
+            async for _ in member[4]:
+                pass
+            members.append(member)
+
+        # The walk completes even though the callback raised.
+        assert len(members) == 1
+
+    async def test_no_on_progress_means_no_extra_history_call(self, async_iter):
+        # The snowflake-bounds resolver only fires when on_progress is
+        # provided. Without it, channel.history should be called once
+        # (the main walk) — never twice (snowflake-bounds + main).
+        session = MagicMock()
+        channel = _channel_with([], async_iter)
+
+        _ = [
+            m
+            async for m in _members(
+                session,
+                channel,
+                None,
+                chunk_size=64,
+            )
+        ]
+
+        assert channel.history.call_count == 1
+
+
+# --- snowflake bounds + filter-stall integration -------------------------
+
+
+class TestSnowflakeBounds:
+    async def test_history_fraction_advances_through_filter_stall(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # Bounded scan via after= → low snowflake comes from the after
+        # arg (no extra history call needed). Filter rejects every
+        # attachment, but history_fraction should still climb from
+        # ~0.0 toward ~1.0 across ticks.
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("filter rejects"))
+        att = make_attachment(content_type="text/plain")
+        # Snowflakes monotonically decrease as we walk newer→older;
+        # use plausible spread so the fraction math has resolution.
+        msgs = [
+            make_message(message_id=mid, attachments=(att,))
+            for mid in (900_000_000_000, 500_000_000_000, 100_000_000_000)
+        ]
+        channel = _channel_with(msgs, async_iter)
+        # last_message_id provides the high snowflake when before is
+        # None; we set both bounds via after= so no extra API call fires.
+        channel.last_message_id = 1_000_000_000_000
+
+        after = datetime(2025, 1, 1, tzinfo=UTC)
+
+        snapshots = []
+
+        async def on_progress(snapshot):
+            snapshots.append(dict(snapshot))
+
+        [
+            m
+            async for m in _members(
+                session,
+                channel,
+                _mime_matcher("image/png"),
+                chunk_size=64,
+                after=after,
+                on_progress=on_progress,
+                progress_throttle_seconds=0.0,
+            )
+        ]
+
+        assert len(snapshots) == 3
+        # attachments_done stays at 0 (filter stall), but the heartbeat
+        # advanced through the walk.
+        assert [s["attachments_done"] for s in snapshots] == [0, 0, 0]
+        # history_fraction should be monotonically non-decreasing as we
+        # walk older messages.
+        fractions = [s["history_fraction"] for s in snapshots]
+        assert fractions == sorted(fractions)
+
+    async def test_fully_unbounded_scan_fetches_oldest_message(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # No before, no after → _resolve_snowflake_bounds makes one extra
+        # channel.history(limit=1, oldest_first=True) call to find low.
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("filter rejects"))
+        att = make_attachment(content_type="text/plain")
+        walk_msgs = [
+            make_message(message_id=mid, attachments=(att,))
+            for mid in (900_000_000_000, 500_000_000_000)
+        ]
+        oldest_msg = make_message(message_id=100_000_000_000)
+
+        # channel.history is called twice: once for the bounds lookup
+        # (limit=1, oldest_first=True) then once for the actual walk.
+        call_count = {"n": 0}
+
+        def history(*args, **kwargs):
+            call_count["n"] += 1
+            if kwargs.get("oldest_first"):
+                return async_iter([oldest_msg])
+            return async_iter(walk_msgs)
+
+        channel = MagicMock()
+        channel.history = MagicMock(side_effect=history)
+        channel.last_message_id = 1_000_000_000_000
+
+        async def on_progress(_snapshot):
+            pass
+
+        [
+            m
+            async for m in _members(
+                session,
+                channel,
+                _mime_matcher("image/png"),
+                chunk_size=64,
+                on_progress=on_progress,
+                progress_throttle_seconds=0.0,
+            )
+        ]
+
+        # Two history calls: one for the bounds lookup, one for the walk.
+        assert call_count["n"] == 2
+        bounds_call = channel.history.call_args_list[0]
+        assert bounds_call.kwargs.get("oldest_first") is True
+        assert bounds_call.kwargs.get("limit") == 1
+
+    async def test_history_fraction_is_none_when_bounds_unresolved(
+        self,
+        async_iter,
+        make_attachment,
+        make_message,
+    ):
+        # No after= and the oldest-message lookup raises → we can't
+        # compute a denominator. ProgressSnapshot.history_fraction must
+        # be None so the embed skips the "Position" field rather than
+        # lying about being "~0% through channel history."
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("filter rejects"))
+        att = make_attachment(content_type="text/plain")
+        walk_msgs = [
+            make_message(message_id=mid, attachments=(att,))
+            for mid in (900_000_000_000, 500_000_000_000)
+        ]
+
+        def history(*args, **kwargs):
+            if kwargs.get("oldest_first"):
+                raise RuntimeError("CDN down")
+            return async_iter(walk_msgs)
+
+        channel = MagicMock()
+        channel.history = MagicMock(side_effect=history)
+        channel.last_message_id = 1_000_000_000_000
+
+        snapshots = []
+
+        async def on_progress(snapshot):
+            snapshots.append(dict(snapshot))
+
+        [
+            m
+            async for m in _members(
+                session,
+                channel,
+                _mime_matcher("image/png"),
+                chunk_size=64,
+                on_progress=on_progress,
+                progress_throttle_seconds=0.0,
+            )
+        ]
+
+        assert len(snapshots) == 2
+        assert all(s["history_fraction"] is None for s in snapshots)

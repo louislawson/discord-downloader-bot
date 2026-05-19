@@ -84,6 +84,20 @@ def ctx(task_context):
     return task_context("task-abc")
 
 
+@pytest.fixture(autouse=True)
+def silence_forget_job(mocker):
+    """Patch ``jobs.forget_job`` so the success path doesn't trip the
+    AsyncMock-redis fixture (which can't model ``pipeline(transaction=True)``).
+
+    Tests in ``TestForgetJobLifecycle`` override this by re-patching to
+    capture call args; the autouse default keeps everyone else quiet.
+    """
+    return mocker.patch(
+        "downloader_bot.tasks.download.jobs.forget_job",
+        new_callable=AsyncMock,
+    )
+
+
 # --- Happy paths -----------------------------------------------------------
 
 
@@ -1065,3 +1079,222 @@ class TestEmptyChannel:
         )
 
         mock_storage_backend.delete_blob.assert_awaited_once()
+
+
+# --- Picked-up sentinel + forget_job lifecycle ------------------------------
+
+
+class TestPickedUpSentinel:
+    async def test_picked_up_is_first_progress_emit(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # The cancel cog uses absence of any progress as "still queued
+        # in RabbitMQ" for the refund decision. The task must emit
+        # phase=picked_up as its FIRST progress call so that signal is
+        # unambiguous (otherwise the cog refunds while the worker is
+        # already fetching the channel).
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        # The very first set_progress call carries phase=picked_up.
+        first_call = progress.set_progress.await_args_list[0]
+        assert first_call.kwargs["meta"]["phase"] == "picked_up"
+
+
+class TestForgetJobLifecycle:
+    async def test_forget_job_called_on_success_path(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Success path drops the user→jobs index entry so /status
+        # stops surfacing the job.
+        mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+        forget_job = mocker.patch(
+            "downloader_bot.tasks.download.jobs.forget_job",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+            user_id=42,
+        )
+
+        forget_job.assert_awaited_once_with(mock_redis, "task-abc", 42)
+
+    async def test_forget_job_not_called_on_intermediate_failure(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Taskiq retries with the same task_id. Forgetting on per-attempt
+        # failure would make /status return "no active jobs" while the
+        # retry is still running. The task MUST NOT call forget_job
+        # from the failure try/finally — only on the success path.
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=UploadError("azure down")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        forget_job = mocker.patch(
+            "downloader_bot.tasks.download.jobs.forget_job",
+            new_callable=AsyncMock,
+        )
+
+        with pytest.raises(UploadError):
+            await _call(
+                context=ctx,
+                progress=progress,
+                client=mock_discord_client,
+                download_session=mock_aiohttp_session,
+                storage=mock_storage_backend,
+                settings_repo=mock_settings_repo,
+                redis=mock_redis,
+            )
+
+        forget_job.assert_not_awaited()
+
+    async def test_forget_job_called_on_empty_channel_success(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Empty-channel branch is a successful terminal outcome (we
+        # delivered the "no media found" embed) — forget_job runs.
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_redis.exists = AsyncMock(return_value=0)
+        mock_storage_backend.upload_and_sign = AsyncMock(
+            side_effect=NoMatchingAttachments("nothing to zip")
+        )
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+        forget_job = mocker.patch(
+            "downloader_bot.tasks.download.jobs.forget_job",
+            new_callable=AsyncMock,
+        )
+
+        await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+            user_id=42,
+        )
+
+        forget_job.assert_awaited_once_with(mock_redis, "task-abc", 42)
+
+    async def test_forget_job_failure_does_not_undo_delivery(
+        self,
+        mock_discord_client,
+        mock_aiohttp_session,
+        mock_redis,
+        mock_settings_repo,
+        mock_storage_backend,
+        progress,
+        ctx,
+        mocker,
+    ):
+        # Best-effort: a Redis blip during forget_job after a successful
+        # delivery should be logged and swallowed, not propagated (or
+        # the user gets a worker error after the DM already arrived).
+        mock_storage_backend.upload_and_sign = AsyncMock(return_value="https://x")
+        mock_discord_client.fetch_channel.return_value = _messageable_channel()
+        mocker.patch(
+            "downloader_bot.tasks.download.zip_stream.build_zip_stream",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.deliver.dm_user",
+            new_callable=AsyncMock,
+        )
+        mocker.patch(
+            "downloader_bot.tasks.download.jobs.forget_job",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("redis down"),
+        )
+
+        # Returns normally (no exception leaks).
+        result = await _call(
+            context=ctx,
+            progress=progress,
+            client=mock_discord_client,
+            download_session=mock_aiohttp_session,
+            storage=mock_storage_backend,
+            settings_repo=mock_settings_repo,
+            redis=mock_redis,
+        )
+
+        assert result["status"] == "delivered"

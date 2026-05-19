@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from downloader_bot.db.guild_settings import GuildSettings
+
 
 @pytest.fixture
 def mock_bot(mock_db_pool, mock_redis):
@@ -11,14 +13,19 @@ def mock_bot(mock_db_pool, mock_redis):
 
     No more ``arq_pool`` — Taskiq uses module-level ``download_channel_media.kiq()``
     on the imported task, not a pool attribute. The bot now carries a
-    ``guild_settings_repo`` instead (used by ``/setup``) and a ``redis``
-    client (used by the per-guild rate limiter in ``/download``).
+    ``guild_settings_repo`` instead (used by ``/setup`` and by the
+    ``/download`` cog when computing the user→jobs index TTL) and a
+    ``redis`` client (used by the per-guild rate limiter in ``/download``).
     """
     bot = MagicMock()
     bot.db_pool = mock_db_pool
     bot.guild_settings_repo = AsyncMock()
     bot.guild_settings_repo.upsert = AsyncMock()
-    bot.guild_settings_repo.get = AsyncMock()
+    # Default to a guild with safe defaults (24h retention). The
+    # /download cog now reads .retention_hours and multiplies by 3600,
+    # which would TypeError against a bare MagicMock attribute.
+    bot.guild_settings_repo.get = AsyncMock(return_value=GuildSettings(guild_id=12345))
+    bot.is_owner = AsyncMock(return_value=False)
     bot.redis = mock_redis
     bot.logger = MagicMock()
     bot.bot_prefix = "!"
@@ -67,6 +74,20 @@ def allow_ratelimit(mocker):
         "downloader_bot.cogs.download.ratelimit.acquire",
         new_callable=AsyncMock,
         return_value=(True, 0.0),
+    )
+
+
+@pytest.fixture(autouse=True)
+def mock_record_job(mocker):
+    """Patch ``jobs.record_job`` for cog tests.
+
+    The real implementation uses ``redis.pipeline(transaction=True)``
+    which the bare AsyncMock redis fixture doesn't model. Tests that
+    care about the call inspect this mock's await_args directly.
+    """
+    return mocker.patch(
+        "downloader_bot.cogs.download.jobs.record_job",
+        new_callable=AsyncMock,
     )
 
 

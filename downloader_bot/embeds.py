@@ -1,6 +1,7 @@
 """Downloader Bot Discord embeds."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 import discord
 
@@ -171,3 +172,142 @@ def job_enqueued(
     )
     embed.set_footer(text=f"Job {task_id}")
     return embed
+
+
+def _humanise_bytes(n: int) -> str:
+    """Render a byte count as ``X.Y GB`` / ``X.Y MB`` / ``X.Y KB`` / ``N bytes``."""
+    if n >= 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024 * 1024):.1f} GB"
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} bytes"
+
+
+_JOB_PHASE_LABELS: dict[str, str] = {
+    "picked_up": "Worker picked it up — starting",
+    "queued": "Queued (waiting for a worker)",
+    "stream": "Streaming attachments",
+    "deliver": "Uploading & delivering",
+    "done": "Delivered",
+    "cancelled": "Cancelled",
+}
+
+
+def job_status(
+    *,
+    task_id: str,
+    phase: Literal["picked_up", "queued", "stream", "deliver", "done", "cancelled"],
+    requester_id: int,
+    attachments_done: int | None = None,
+    bytes_streamed: int | None = None,
+    history_fraction: float | None = None,
+    heartbeat_age_seconds: float | None = None,
+) -> discord.Embed:
+    """Build the ``/status`` read embed.
+
+    Colour is picked from ``phase`` (cancelled → red, done → green,
+    everything in-flight → blurple). Rendering uses ``add_field`` rather
+    than a long description line so the mobile Discord client doesn't
+    wrap mid-word.
+
+    Args:
+        task_id: The Taskiq task ID, rendered in the footer.
+        phase: Current phase as reported by the task's progress meta,
+            or ``"queued"`` when no progress exists yet, or ``"cancelled"``
+            when the cancellation backend reports the job cancelled.
+        requester_id: Discord user ID of the requester (footer mention).
+        attachments_done: Optional running count of attachments included
+            in the zip so far.
+        bytes_streamed: Optional running byte total for those attachments.
+        history_fraction: Optional snowflake-position estimate in
+            ``[0.0, 1.0]`` — rendered as "~X% through channel history."
+        heartbeat_age_seconds: Optional seconds since the last progress
+            tick — rendered as "Xs ago" to distinguish stuck from slow.
+
+    Returns:
+        A discord.Embed with conditional fields for whatever meta is
+        available.
+    """
+    if phase == "cancelled":
+        embed = error(title="Job cancelled")
+    elif phase == "done":
+        embed = success(title="Job delivered")
+    else:
+        embed = info(title="Job status")
+
+    embed.add_field(
+        name="Phase",
+        value=_JOB_PHASE_LABELS.get(phase, "Unknown phase"),
+        inline=False,
+    )
+
+    if heartbeat_age_seconds is not None:
+        embed.add_field(
+            name="Heartbeat",
+            value=f"{int(heartbeat_age_seconds)}s ago",
+            inline=True,
+        )
+    if history_fraction is not None:
+        embed.add_field(
+            name="Position",
+            value=f"~{int(history_fraction * 100)}% through channel history",
+            inline=True,
+        )
+    if attachments_done is not None:
+        embed.add_field(
+            name="Tally",
+            value=(
+                f"{attachments_done} attachments, "
+                f"{_humanise_bytes(bytes_streamed or 0)}"
+            ),
+            inline=True,
+        )
+
+    embed.set_footer(text=f"Job {task_id} • requested by <@{requester_id}>")
+    return embed
+
+
+def job_cancelled(*, task_id: str, requester_id: int) -> discord.Embed:
+    """Build the ``/cancel`` confirmation embed.
+
+    Does not mention rate-limit refund — whether a token was returned is
+    an internal bookkeeping detail; users don't know what the bucket is.
+
+    Args:
+        task_id: The Taskiq task ID, rendered in the footer.
+        requester_id: Discord user ID of the requester (footer mention).
+    """
+    embed = error(
+        title="Cancellation requested",
+        description=("The worker will stop and clean up any partial archive."),
+    )
+    embed.set_footer(text=f"Job {task_id} • requested by <@{requester_id}>")
+    return embed
+
+
+def job_not_found(*, task_id: str | None = None) -> discord.Embed:
+    """Build the generic "not found" embed for ``/status`` and ``/cancel``.
+
+    Deliberately collapses 404 (no such task) and 403 (not yours) into a
+    single response so a leaked task ID from a public channel ack
+    footer can't be used to probe for existence.
+
+    Args:
+        task_id: When ``None``, render as "no active jobs" (the user
+            ran ``/status`` with no args). Otherwise render as "job not
+            found" without distinguishing missing from unauthorised.
+    """
+    if task_id is None:
+        return error(
+            title="No active jobs",
+            description="You don't have any active downloads to look at.",
+        )
+    return error(
+        title="Job not found",
+        description=(
+            "That job doesn't exist, has already finished, or you don't have "
+            "access to it."
+        ),
+    )
